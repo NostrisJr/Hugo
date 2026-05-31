@@ -19,14 +19,19 @@ Fonctionnel aujourd'hui :
 - ✅ Moteur de règles (`trait Rule` + agrégation)
 - ✅ Règle « mot doublé » (`il il` → `il`)
 - ✅ Règle « majuscule après ponctuation terminale »
-- ✅ Plugin Tauri v2 (`check_text`), stubs C FFI et WASM compilables
+- ✅ **Correcteur orthographique** : 449 k formes Dicollecte compilées en FST (581 Ko)
+  **embarqué** dans la bibliothèque ; détection des mots inconnus et suggestions
+  par automate de Levenshtein reclassées en Damerau-Levenshtein
+- ✅ Plugin Tauri v2 (`check_text`), bindings C FFI et WASM fonctionnels
 
 À venir :
 
-- ⏳ Compilation du Lefff en FST et de Dicollecte en DAWG (`tools/`)
-- ⏳ Correcteur orthographique (Damerau-Levenshtein)
+- ⏳ Compilation du Lefff en FST (morphologie) — `tools/compile-lefff`
 - ⏳ Règles d'accord (déterminant–nom, sujet–verbe) et homophones (phase 2)
+- ⏳ Fréquences lexicales pour le tri des suggestions
 - ⏳ CRF de désambiguïsation POS (phase 4)
+
+Démo : `cargo run --example check -- "les maison son belle. il dort dans dans."`
 
 Voir [`ROADMAP.md`](ROADMAP.md) pour le détail des phases.
 
@@ -42,11 +47,25 @@ hugo/
 │   ├── hugo-wasm/     Bindings WebAssembly — JS/TS (paquet npm hugo-wasm)
 │   └── hugo-tauri/    Plugin Tauri v2 (commande check_text)
 └── tools/
-    ├── compile-lefff/ Lefff (TSV) → lefff.fst
-    └── compile-dict/  Dicollecte (.dic/.aff) → dicollecte.dawg
+    ├── compile-lefff/ Lefff (TSV) → lefff.fst (à venir)
+    └── compile-dict/  Dicollecte (.dic/.aff Hunspell) → dicollecte.fst
 ```
 
-Le pipeline de `hugo-core` : `texte → tokenizer → (morpho) → règles → suggestions`.
+Le pipeline de `hugo-core` : `texte → tokenizer → (morpho) → règles + orthographe → suggestions`.
+
+### Régénérer le dictionnaire orthographique
+
+Le FST embarqué (`crates/hugo-core/assets/dicollecte.fst`) est dérivé du
+dictionnaire Hunspell français de Dicollecte (MPL 2.0). Pour le reconstruire :
+
+```sh
+# 1. Récupérer le dictionnaire source (MPL 2.0)
+curl -sSL -o fr.aff https://raw.githubusercontent.com/LibreOffice/dictionaries/master/fr_FR/fr.aff
+curl -sSL -o fr.dic https://raw.githubusercontent.com/LibreOffice/dictionaries/master/fr_FR/fr.dic
+
+# 2. Développer les affixes et compiler le FST
+cargo run -p compile-dict --release -- fr.dic fr.aff crates/hugo-core/assets/dicollecte.fst
+```
 
 ## Utilisation
 
@@ -112,4 +131,6 @@ Distribué sous double licence, au choix :
 
 Sauf mention contraire, toute contribution soumise pour inclusion est réputée
 doublement licenciée comme ci-dessus, sans condition supplémentaire.
-# Hugo
+
+Le dictionnaire orthographique embarqué est dérivé de Dicollecte (MPL 2.0) ;
+voir [`NOTICE.md`](NOTICE.md) pour l'attribution.

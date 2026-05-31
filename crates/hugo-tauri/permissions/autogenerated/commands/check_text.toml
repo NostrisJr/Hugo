@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-check-text"
+description = "Enables the check_text command without any pre-configured scope."
+commands.allow = ["check_text"]
+
+[[permission]]
+identifier = "deny-check-text"
+description = "Denies the check_text command without any pre-configured scope."
+commands.deny = ["check_text"]

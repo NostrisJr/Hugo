@@ -1,0 +1,24 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Données compilées (générées par tools/, non versionnées)
+*.fst
+*.dawg
+# … sauf l'asset orthographique embarqué par hugo-core (POC)
+!crates/hugo-core/assets/dicollecte.fst
+
+# Sources de données brutes (à télécharger, non redistribuées)
+/data
+
+# Artefacts d'intégration
+/crates/hugo-wasm/pkg
+/crates/hugo-ffi/include
+*.xcframework
+
+# OS / éditeurs
+.DS_Store
+*.swp
+.idea/
+.vscode/

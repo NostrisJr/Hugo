@@ -1,0 +1,22 @@
+[package]
+name = "hugo-core"
+description = "Correcteur orthographique et grammatical français, embarquable et local."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+fst = { version = "0.4", features = ["levenshtein"] }
+
+[features]
+default = []
+# Active la sérialisation Serde des types publics (Span, Suggestion).
+serde = ["dep:serde"]
+
+[dependencies.serde]
+workspace = true
+optional = true

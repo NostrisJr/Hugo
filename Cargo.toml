@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hugo-core",
+    "crates/hugo-ffi",
+    "crates/hugo-wasm",
+    "crates/hugo-tauri",
+    "tools/compile-lefff",
+    "tools/compile-dict",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/theophiledonato/hugo"
+authors = ["Théophile Donato <theophile.donato@gmail.com>"]
+rust-version = "1.74"
+
+[workspace.dependencies]
+hugo-core = { path = "crates/hugo-core", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
