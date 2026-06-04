@@ -3596,6 +3596,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "train-crf"
+version = "0.1.0"
+dependencies = [
+ "hugo-core",
+]
+
+[[package]]
 name = "tray-icon"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

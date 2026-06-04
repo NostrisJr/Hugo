@@ -21,11 +21,13 @@
 //! ```
 
 pub mod morpho;
+pub mod pos;
 pub mod rules;
 pub mod spelling;
 pub mod tokenizer;
 
 pub use morpho::{Morph, MorphCategory, Number, Person};
+pub use pos::{Tagged, Upos};
 pub use rules::Rule;
 pub use spelling::SpellChecker;
 pub use tokenizer::{Token, TokenKind};
@@ -110,11 +112,14 @@ impl Checker {
     /// Vérifie un texte et retourne les suggestions, triées par position.
     pub fn check(&self, text: &str) -> Vec<Suggestion> {
         let tokens = tokenizer::tokenize(text);
+        // Désambiguïsation POS (CRF) : une étiquette unique par token, alignée
+        // sur `tokens`. Calculée une seule fois et offerte à chaque règle.
+        let tags = pos::tag(&tokens);
         let mut suggestions = Vec::new();
 
         // Appliquer les règles grammaticales.
         for rule in &self.rules {
-            suggestions.extend(rule.check(&tokens));
+            suggestions.extend(rule.check_tagged(&tokens, &tags));
         }
 
         // Appliquer le correcteur orthographique (Dicollecte).
@@ -129,6 +134,16 @@ impl Checker {
                 .then_with(|| a.rule_id.cmp(b.rule_id))
         });
         suggestions
+    }
+
+    /// Étiquette morphosyntaxiquement un texte (désambiguïsation POS par CRF).
+    ///
+    /// Renvoie une étiquette par token, **alignée** sur la tokenisation de
+    /// `text`. Utile au débogage, aux tests, et au futur câblage des règles sur
+    /// une catégorie unique.
+    pub fn tag(&self, text: &str) -> Vec<Tagged> {
+        let tokens = tokenizer::tokenize(text);
+        pos::tag(&tokens)
     }
 
     /// Signale les mots absents du dictionnaire et propose des corrections.

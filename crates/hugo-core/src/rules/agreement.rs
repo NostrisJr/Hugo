@@ -14,6 +14,7 @@
 
 use super::{lexical_tokens, Rule};
 use crate::morpho::{self, Gender, MorphCategory, Number};
+use crate::pos::{Tagged, Upos};
 use crate::tokenizer::Token;
 use crate::Suggestion;
 
@@ -143,6 +144,47 @@ const RULE_ID: &str = "determiner_noun_agreement";
 /// Nombre maximal d'adjectifs antéposés sautés entre le déterminant et le nom.
 const MAX_PRENOMINAL: usize = 3;
 
+/// Construit la correction du déterminant d'après le nom tête, ou `None` si
+/// l'accord est déjà correct (ou le genre du nom indéterminé).
+fn agree(det_token: &Token, det: &DetInfo, noun: &Token) -> Option<Suggestion> {
+    let det_lower = det_token.text.to_lowercase();
+    let noun_analyses: Vec<_> = morpho::lookup(&noun.text)
+        .into_iter()
+        .filter(|m| m.category == MorphCategory::Noun)
+        .collect();
+
+    let noun_gender = consensus(noun_analyses.iter().map(|m| m.gender));
+    let noun_number = consensus(noun_analyses.iter().map(|m| m.number));
+
+    // Genre/nombre cibles : ceux du nom s'ils sont connus, sinon ceux du
+    // déterminant (auquel cas la correction restera identique).
+    let det_gender = match det.gender {
+        GenderC::Masc => Some(Gender::Masculine),
+        GenderC::Fem => Some(Gender::Feminine),
+        GenderC::Any => None,
+    };
+    let target_gender = noun_gender.or(det_gender);
+    let target_plural = match noun_number {
+        Some(Number::Singular) => false,
+        Some(Number::Plural) => true,
+        _ => det.plural,
+    };
+
+    let corrected = corrected_form(det.family, target_gender, target_plural)?;
+    if corrected.eq_ignore_ascii_case(&det_lower) {
+        return None; // déjà accordé
+    }
+    Some(Suggestion {
+        span: det_token.span,
+        message: format!(
+            "Accord déterminant–nom : « {} » ne s'accorde pas avec « {} ».",
+            det_token.text, noun.text
+        ),
+        replacements: vec![match_case(&det_token.text, corrected)],
+        rule_id: RULE_ID,
+    })
+}
+
 impl Rule for DeterminerNounAgreement {
     fn check(&self, tokens: &[Token]) -> Vec<Suggestion> {
         let lex = lexical_tokens(tokens);
@@ -190,45 +232,55 @@ impl Rule for DeterminerNounAgreement {
             }
 
             let Some(noun) = head else { continue };
-            let noun_analyses: Vec<_> = morpho::lookup(&noun.text)
-                .into_iter()
-                .filter(|m| m.category == MorphCategory::Noun)
-                .collect();
+            if let Some(s) = agree(det_token, &det, noun) {
+                suggestions.push(s);
+            }
+        }
 
-            let noun_gender = consensus(noun_analyses.iter().map(|m| m.gender));
-            let noun_number = consensus(noun_analyses.iter().map(|m| m.number));
+        suggestions
+    }
 
-            // Genre/nombre cibles : ceux du nom s'ils sont connus, sinon ceux
-            // du déterminant (auquel cas la correction restera identique).
-            let det_gender = match det.gender {
-                GenderC::Masc => Some(Gender::Masculine),
-                GenderC::Fem => Some(Gender::Feminine),
-                GenderC::Any => None,
-            };
-            let target_gender = noun_gender.or(det_gender);
-            let target_plural = match noun_number {
-                Some(Number::Singular) => false,
-                Some(Number::Plural) => true,
-                _ => det.plural,
-            };
+    fn check_tagged(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
+        let lex = lexical_tokens(tokens);
+        let mut suggestions = Vec::new();
 
-            let Some(corrected) = corrected_form(det.family, target_gender, target_plural) else {
+        for i in 0..lex.len() {
+            let (det_idx, det_token) = lex[i];
+            let det_lower = det_token.text.to_lowercase();
+            let Some(det) = classify(&det_lower) else {
                 continue;
             };
-            if corrected.eq_ignore_ascii_case(&det_lower) {
-                continue; // déjà accordé
+            // Garde POS : un « le »/« la »/« les »/« des » étiqueté pronom est un
+            // pronom objet devant un verbe (« je les ferme »), pas un déterminant.
+            if tags[det_idx].upos == Upos::Pron {
+                continue;
             }
 
-            let replacement = match_case(&det_token.text, corrected);
-            suggestions.push(Suggestion {
-                span: det_token.span,
-                message: format!(
-                    "Accord déterminant–nom : « {} » ne s'accorde pas avec « {} ».",
-                    det_token.text, noun.text
-                ),
-                replacements: vec![replacement],
-                rule_id: RULE_ID,
-            });
+            // Tête nominale : premier jeton étiqueté nom, en sautant les
+            // adjectifs antéposés (étiquetés `ADJ`) — robuste aux homographes,
+            // car c'est l'étiquette POS, non une heuristique de lookahead, qui
+            // tranche « douce/vieux/principales » entre nom et adjectif.
+            let mut head: Option<&Token> = None;
+            let mut steps = 0;
+            let mut k = i + 1;
+            while k < lex.len() && steps <= MAX_PRENOMINAL {
+                match tags[lex[k].0].upos {
+                    Upos::Adj => {
+                        k += 1;
+                        steps += 1;
+                    }
+                    Upos::Noun | Upos::Propn => {
+                        head = Some(lex[k].1);
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+
+            let Some(noun) = head else { continue };
+            if let Some(s) = agree(det_token, &det, noun) {
+                suggestions.push(s);
+            }
         }
 
         suggestions
@@ -343,7 +395,11 @@ mod tests {
     fn ambiguous_prenominal_adjective_is_skipped() {
         // « douce »/« vieux » ont une lecture nominale parasite : le vrai nom
         // tête est celui qui suit. Pas de fausse alerte sur le déterminant.
-        for ok in ["une douce lumière", "le vieux canapé", "une belle grande maison"] {
+        for ok in [
+            "une douce lumière",
+            "le vieux canapé",
+            "une belle grande maison",
+        ] {
             assert!(
                 replacements(ok).is_empty(),
                 "faux positif sur « {ok} » : {:?}",
@@ -360,6 +416,51 @@ mod tests {
                 "faux positif sur « {ok} » : {:?}",
                 replacements(ok)
             );
+        }
+    }
+
+    // --- Chemin POS (`check_tagged`). ---
+
+    fn tagged_first(text: &str) -> Option<String> {
+        let tokens = tokenize(text);
+        let tags = crate::pos::tag(&tokens);
+        DeterminerNounAgreement
+            .check_tagged(&tokens, &tags)
+            .into_iter()
+            .next()
+            .and_then(|s| s.replacements.into_iter().next())
+    }
+
+    fn tagged_count(text: &str) -> usize {
+        let tokens = tokenize(text);
+        let tags = crate::pos::tag(&tokens);
+        DeterminerNounAgreement.check_tagged(&tokens, &tags).len()
+    }
+
+    #[test]
+    fn pos_path_object_pronoun_is_not_determiner() {
+        // « je les ferme » : « les » est pronom objet (POS), pas déterminant —
+        // l'heuristique morpho seule produisait ici un faux positif (« la »).
+        assert_eq!(tagged_count("je les ferme"), 0);
+        assert_eq!(tagged_count("il la mange"), 0);
+    }
+
+    #[test]
+    fn pos_path_still_corrects_real_mismatches() {
+        assert_eq!(tagged_first("un table").as_deref(), Some("une"));
+        assert_eq!(tagged_first("les chat").as_deref(), Some("le"));
+        assert_eq!(tagged_first("un belle table").as_deref(), Some("une"));
+    }
+
+    #[test]
+    fn pos_path_silent_on_correct_phrases() {
+        for ok in [
+            "la table",
+            "les chats",
+            "une douce lumière",
+            "le vieux canapé",
+        ] {
+            assert_eq!(tagged_count(ok), 0, "faux positif sur « {ok} »");
         }
     }
 }

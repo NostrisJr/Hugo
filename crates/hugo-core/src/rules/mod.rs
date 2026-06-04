@@ -20,8 +20,13 @@ pub mod conjugation;
 pub mod duplicates;
 pub mod epithet;
 pub mod homophones;
+pub mod past_participle;
+pub mod pronominal_participle;
 pub mod quantifier;
+pub mod special_agreement;
+pub mod subjunctive;
 
+use crate::pos::Tagged;
 use crate::tokenizer::{Token, TokenKind};
 use crate::Suggestion;
 
@@ -32,6 +37,19 @@ use crate::Suggestion;
 pub trait Rule: Send + Sync {
     /// Analyse les tokens et renvoie les suggestions détectées.
     fn check(&self, tokens: &[Token]) -> Vec<Suggestion>;
+
+    /// Variante recevant en plus les étiquettes POS désambiguïsées par le CRF
+    /// ([`crate::pos::tag`]), **alignées** sur `tokens` (`tags[i]` étiquette
+    /// `tokens[i]`).
+    ///
+    /// Par défaut, ignore les tags et délègue à [`Rule::check`] : les règles
+    /// historiques (heuristiques sur la morphologie brute) continuent de
+    /// fonctionner inchangées. Les règles qui ont besoin d'une catégorie unique
+    /// (ou/où, se/ce, accord nominal au-delà du premier homographe…) surchargent
+    /// cette méthode.
+    fn check_tagged(&self, tokens: &[Token], _tags: &[Tagged]) -> Vec<Suggestion> {
+        self.check(tokens)
+    }
 
     /// Nom lisible de la règle.
     fn name(&self) -> &'static str;
@@ -48,8 +66,12 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(agreement::DeterminerNounAgreement),
         Box::new(conjugation::SubjectVerbAgreement),
         Box::new(attribute::AttributeAdjectiveAgreement),
+        Box::new(pronominal_participle::PronominalParticiple),
         Box::new(epithet::EpithetAdjectiveAgreement),
         Box::new(quantifier::ToutAgreement),
+        Box::new(special_agreement::SpecialAgreement),
+        Box::new(past_participle::PastParticipleAvoir),
+        Box::new(subjunctive::SubjunctiveAfterConjunction),
         Box::new(homophones::HomophoneRule),
     ]
 }

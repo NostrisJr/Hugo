@@ -29,13 +29,38 @@ Fonctionnel aujourd'hui :
   « les chat » → « le », « le chats » → « les »
 - ✅ **Accord sujet–verbe** (sujets pronoms) : « ils mange » → « mangent »,
   « tu mange » → « manges » ; correction engendrée par conjugaison du lemme
+- ✅ **Désambiguïsation POS (CRF)** : étiqueteur morphosyntaxique (CRF à chaîne
+  linéaire entraîné sur UD French-GSD, **~97,8 % d'exactitude**, modèle **2,6 Mo**
+  embarqué) ; tranche les homographes (« elle **ferme** la **porte** » →
+  VERBE / NOM) et distingue auxiliaire et verbe plein (« **sont** partis » → AUX
+  + VERBE). Branché dans le pipeline ; étiquettes offertes aux règles
+  (`Rule::check_tagged`).
 - ✅ Plugin Tauri v2 (`check_text`), bindings C FFI et WASM fonctionnels
+
+Règles **adossées au CRF** (consomment les étiquettes POS via `Rule::check_tagged`) :
+
+- ✅ **se → ce** : « se petit chat » → « ce » — un « se » réflexif est toujours
+  préverbal (`rules::homophones`).
+- ✅ **son ↔ sont** par **étiquetage contrefactuel** : on compare le score POS des
+  deux graphies (« mes parents son venus » → « sont », « il caresse sont chat » →
+  « son »). *ou/où* reste hors de portée (pas de signal séparable).
+- ✅ **Participe passé avec « avoir » + COD antéposé** (`rules::past_participle`) :
+  « je les ai vu » → « vus »/« vues », « il la a vu » → « vue ».
+- ✅ **Participe passé pronominal** (`rules::pronominal_participle`) : « elle s'est
+  levé » → « levée » ; garde du COD postposé (« elle s'est lavé les mains »).
+- ✅ **Subjonctif après conjonction** (`rules::subjunctive`) : « bien qu'il est » →
+  « soit », « pour que tu viens » → « viennes » (sujets pronominaux **et** nominaux).
+- ✅ **Accords spéciaux** (`rules::special_agreement`) : couleurs-noms invariables
+  (« des gants marrons » → « marron »), même (« les même livres » → « mêmes »),
+  quelque (« quelque livres » → « quelques »).
+- ✅ **Robustesse POS des accords** : déterminant–nom et épithète identifient la
+  tête nominale par étiquetage (plus de faux positifs « je les ferme », « est »).
 
 À venir :
 
-- ⏳ Accord sujet–verbe avec sujets nominaux (« les chats mange »)
-- ⏳ Accord de l'adjectif attribut et homophones grammaticaux (a/à, son/sont…)
-- ⏳ CRF de désambiguïsation POS (phase 4)
+- ⏳ ou/où (pas de signal séparable) ; concordance des temps au subjonctif ;
+  couleurs composées (« bleu ciel ») ; nombres composés ; port des règles
+  LanguageTool
 
 Démo : `cargo run --example check -- "Ils mange un belle table. Tu mange une pome."`
 
@@ -48,16 +73,17 @@ Workspace Cargo organisé en crates et outils :
 ```
 hugo/
 ├── crates/
-│   ├── hugo-core/     Bibliothèque centrale : tokenizer, morpho, règles, correcteur
+│   ├── hugo-core/     Bibliothèque centrale : tokenizer, morpho, POS (CRF), règles, correcteur
 │   ├── hugo-ffi/      Bindings C (staticlib/cdylib) — iOS, macOS, Android
 │   ├── hugo-wasm/     Bindings WebAssembly — JS/TS (paquet npm hugo-wasm)
 │   └── hugo-tauri/    Plugin Tauri v2 (commande check_text)
 └── tools/
     ├── compile-morpho/ Lexique383 (TSV) → morpho.fst + morpho.bin
-    └── compile-dict/   Dicollecte (.dic/.aff Hunspell) → dicollecte.fst
+    ├── compile-dict/   Dicollecte (.dic/.aff Hunspell) → dicollecte.fst
+    └── train-crf/      UD French-GSD (CoNLL-U) → pos.crf (modèle POS)
 ```
 
-Le pipeline de `hugo-core` : `texte → tokenizer → morpho → règles + orthographe → suggestions`.
+Le pipeline de `hugo-core` : `texte → tokenizer → morpho → POS (CRF) → règles + orthographe → suggestions`.
 
 ### Régénérer le dictionnaire orthographique
 
@@ -80,6 +106,24 @@ Les assets `morpho.fst`/`morpho.bin` sont dérivés de Lexique383 (CC BY-SA 4.0)
 ```sh
 curl -sSL -o Lexique383.tsv http://www.lexique.org/databases/Lexique383/Lexique383.tsv
 cargo run -p compile-morpho --release -- Lexique383.tsv crates/hugo-core/assets/morpho
+```
+
+### Régénérer le modèle POS (CRF)
+
+L'asset embarqué `crates/hugo-core/assets/pos.crf` est un CRF d'étiquetage
+morphosyntaxique entraîné sur **Universal Dependencies French-GSD** (CC BY-SA 4.0).
+Pour le reconstruire (voir [`tools/train-crf`](tools/train-crf/)) :
+
+```sh
+# 1. Récupérer les corpus CoNLL-U (train / dev / test)
+base=https://raw.githubusercontent.com/UniversalDependencies/UD_French-GSD/master
+for split in train dev test; do
+  curl -sSL -o fr-$split.conllu $base/fr_gsd-ud-$split.conllu
+done
+
+# 2. Entraîner et écrire l'asset embarqué (affiche l'exactitude dev/test)
+cargo run -p train-crf --release -- fr-train.conllu fr-dev.conllu fr-test.conllu \
+  crates/hugo-core/assets/pos.crf
 ```
 
 ## Utilisation

@@ -1,0 +1,18 @@
+[package]
+name = "train-crf"
+description = "Entraîne le CRF d'étiquetage POS de Hugo sur Universal Dependencies."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "train-crf"
+path = "src/main.rs"
+
+[dependencies]
+hugo-core = { workspace = true }
+
+[features]
+# Réutilise l'extraction de traits et la sérialisation du runtime.
+default = []

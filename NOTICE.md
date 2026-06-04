@@ -35,3 +35,17 @@ La feuille de route mentionnait le Lefff (LGPL-LR) pour la morphologie ; celui-c
 n'étant plus distribué à une URL stable, Lexique383 a été retenu. La CC BY-SA 4.0
 s'applique aux assets dérivés (attribution + partage à l'identique de ces
 fichiers de données), sans couvrir le code source de Hugo.
+
+### Modèle d'étiquetage POS — Universal Dependencies French-GSD
+
+`crates/hugo-core/assets/pos.crf` est un modèle CRF d'étiquetage
+morphosyntaxique **entraîné** sur le treebank **UD French-GSD** (annotations
+UPOS).
+
+- Licence : **Creative Commons Attribution-ShareAlike 4.0** (CC BY-SA 4.0)
+- Source : <https://github.com/UniversalDependencies/UD_French-GSD>
+- Outil de génération : `tools/train-crf` (voir `README.md`)
+
+Le modèle est un produit dérivé du corpus annoté ; la CC BY-SA 4.0 s'applique à
+cet asset (attribution + partage à l'identique de ce fichier de données), sans
+couvrir le code source de Hugo.

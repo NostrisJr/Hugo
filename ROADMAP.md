@@ -85,8 +85,9 @@ Livrer une bibliothèque Rust autonome capable de :
   - [x] Sujets pronominaux (il/elle/ils/elles) et nominaux à genre connu
 - [x] **Homophones grammaticaux — fréquents** (`rules::homophones`, heuristiques haute précision)
   - [x] a/à : "il va a Paris" → "il va à Paris" (et "il à faim" → "a")
-  - [ ] ou/où : nécessite la désambiguïsation POS (phase 4)
-  - [x] ce/se : "il ce lève" → "il se lève" (sens ce→se uniquement)
+  - [ ] ou/où : nécessite un étiquetage contrefactuel (phase 4+)
+  - [x] ce/se : "il ce lève" → "se" (ce→se, heuristique) **et** "se chat" → "ce"
+    (se→ce, via les étiquettes POS du CRF — `Rule::check_tagged`)
   - [x] mes/mais : "mes je ne sais pas" → "mais je ne sais pas"
   - [x] son/sont : "ils son partis" → "ils sont partis"
   - [x] on/ont : "ils on mangé" → "ils ont mangé"
@@ -98,8 +99,10 @@ Livrer une bibliothèque Rust autonome capable de :
 > **État (phase 2 — terminée)** : les cinq familles de règles
 > d'accord/homophonie sont fonctionnelles et testées (101 tests unitaires + 3
 > tests d'intégration, `cargo clippy` propre). Seuls restent volontairement
-> hors phase 2 les homophones qui exigent un contexte POS riche (ou/où, sens
-> se→ce, sont→son), repoussés à la **phase 4** avec le CRF.
+> hors phase 2 les homophones qui exigent un contexte POS riche. Depuis la
+> **phase 4** (CRF), le sens **se→ce** est traité ; ou/où et sont→son attendent
+> un étiquetage contrefactuel (l'étiqueteur « rattrape » l'erreur dans la phrase
+> fautive).
 
 ---
 
@@ -135,11 +138,14 @@ Livrer une bibliothèque Rust autonome capable de :
 
 **Objectif** : CRF pour la désambiguïsation POS + règles nécessitant un contexte syntaxique précis.
 
-- [ ] **CRF (Conditional Random Field)** — désambiguïsation POS
-  - [ ] Entraînement sur Universal Dependencies French-GSD
-  - [ ] Modèle compact (~2 MB)
-  - [ ] Intégration dans le pipeline entre morpho lookup et moteur de règles
-  - [ ] Précision POS cible : >97%
+- [x] **CRF (Conditional Random Field)** — désambiguïsation POS
+  - [x] Entraînement sur Universal Dependencies French-GSD (`tools/train-crf` :
+    CoNLL-U → features partagées → forward-backward + L-BFGS maison, pur Rust)
+  - [x] Modèle compact embarqué (`assets/pos.crf`, **2,6 Mo**, poids quantifiés i16)
+  - [x] Intégration dans le pipeline entre morpho lookup et moteur de règles
+    (`pos::tag` dans `Checker::check`, exposé aux règles via `Rule::check_tagged`)
+  - [x] Précision POS : **97,8 % (dev) / 97,6 % (test)** — cible >97 % atteinte
+  - [ ] *Suivi* : réécriture des règles pour consommer la catégorie unique
 
 #### Plan d'implémentation du CRF
 
@@ -182,30 +188,55 @@ contexte) remplacerait ces heuristiques par une désambiguïsation globale.
 des phrases courtes, reste très en dessous du budget <5 ms. Vérifier l'empreinte
 du modèle embarqué (cible ~2 MB) et le temps de chargement initial.
 
-**Débloque ensuite.** ou/où, se/ce (sens manquant), sont/son, accord nominal
-au-delà du premier homographe, et l'accord du participe passé (qui suppose de
-distinguer auxiliaire vs. verbe plein).
+**Débloqué.** Toutes ces règles consomment désormais le POS via
+`Rule::check_tagged` : se→ce et son↔sont (`rules::homophones`, étiquetage
+contrefactuel) ; robustesse aux homographes de l'accord déterminant–nom et
+épithète ; participe passé avec « avoir » (auxiliaire vs. verbe plein) et
+pronominal ; subjonctif ; accords spéciaux. Restent ou/où (pas de signal
+séparable) et la concordance des temps.
 - [~] **Accord du participe passé**
   - [x] Avec être : "elle est parti" → "elle est partie" (`rules::attribute` +
     `morpho::participle`), y compris sujets nominaux ("les invités sont venu" →
     "venus")
-  - [ ] Avec avoir + COD antéposé : "je les ai vu" → "je les ai vus"
-  - [ ] Verbes pronominaux : "elle s'est levé" → "elle s'est levée"
+  - [~] Avec avoir + COD antéposé (`rules::past_participle`, consomme le POS) :
+    « je les ai vu » → « vus »/« vues » (les deux genres proposés pour *les*),
+    « il la a vu » → « vue ». Limité aux clitiques objets non ambigus *les*/*la*
+    (me/te/nous/vous, ambigus sujet/objet, et *l'* indéterminé, sont écartés).
+  - [x] Verbes pronominaux (`rules::pronominal_participle`, consomme le POS) :
+    « elle s'est levé » → « levée », « ils se sont trompé » → « trompés ».
+    Garde du **COD postposé** : « elle s'est lavé les mains » reste invariable.
+    `rules::attribute` délègue désormais ces constructions à la règle dédiée.
 - [x] **Accord de l'adjectif épithète** (`rules::epithet`)
   - [x] Adjectifs antéposés et postposés : "les chats noir" → "noirs",
     "les petit chats" → "petits"
   - [x] Robustesse aux homographes nom/adjectif (« douce », « principales »…) :
     correction conjointe dans les règles déterminant–nom et sujet–verbe
+  - [x] Robustesse POS (`check_tagged`) : la tête nominale doit être étiquetée
+    nom — corrige le faux positif « est » (auxiliaire vs. nom « l'Est »)
   - [ ] Correction conjointe déterminant + adjectif ("une grande maisons" →
     "de grandes maisons") — partiellement (adjectif et déterminant corrigés
     séparément)
-- [ ] **Subjonctif**
-  - [ ] Après bien que, pour que, afin que, quoique…
-  - [ ] "bien qu'il est" → "bien qu'il soit"
-- [ ] **Accords spéciaux**
-  - [ ] Adjectifs de couleur composés (invariables) : "des robes bleu ciel"
-  - [~] tout/même/quelque : "toute les jours" → "tous les jours"
-    (`rules::quantifier` — *tout* fait ; *même*/*quelque* à venir)
+- [~] **Accord déterminant–nom** (`rules::agreement`)
+  - [x] Robustesse POS (`check_tagged`) : tête nominale via les étiquettes (sauts
+    d'adjectifs antéposés) ; garde anti pronom objet (« je les ferme » n'est plus
+    pris pour un déterminant–nom)
+- [~] **Subjonctif** (`rules::subjunctive`, consomme le POS)
+  - [x] Après un ensemble fermé non ambigu : bien que, pour que, afin que,
+    avant que, sans que, pourvu que, quoique, (à) condition que, de peur/crainte
+    que, quoi que — « bien qu'il est » → « bien qu'il soit », « pour que tu
+    viens » → « viennes ». Ne touche pas les formes où indicatif = subjonctif
+    (« bien qu'il mange »).
+  - [x] Sujets **nominaux** : « bien que les enfants sont » → « soient »
+  - [ ] Conjonctions ambiguës (de sorte que…) et concordance des temps (imparfait
+    → subjonctif imparfait) — écartées (correction de temps ambiguë)
+- [~] **Accords spéciaux** (`rules::special_agreement`, consomme le POS)
+  - [x] Couleurs **issues de noms**, invariables : « des gants marrons » →
+    « marron », « des yeux noisettes » → « noisette » (postposées à un nom ;
+    rose/mauve/pourpre… exclues car elles s'accordent)
+  - [x] **même** : « les même livres » → « mêmes » (adverbe « même les… » exclu) ;
+    **quelque** : « quelque livres » → « quelques » (« quelque chose » exclu)
+  - [x] *tout* : "toute les jours" → "tous les jours" (`rules::quantifier`)
+  - [ ] Adjectifs de couleur **composés** : "des robes bleu ciel" (deux mots)
   - [ ] Trait d'union dans les nombres composés (post-réforme 1990)
 - [ ] **Port des règles LanguageTool**
   - [ ] Inventaire des règles françaises XML de LanguageTool

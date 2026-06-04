@@ -27,7 +27,12 @@ const RULE_ID: &str = "attribute_adjective_agreement";
 
 /// Lemmes des verbes attributifs (copules) déclencheurs.
 const COPULAS: &[&str] = &[
-    "être", "sembler", "paraître", "devenir", "rester", "demeurer",
+    "être",
+    "sembler",
+    "paraître",
+    "devenir",
+    "rester",
+    "demeurer",
 ];
 
 /// Fenêtre maximale (en jetons lexicaux) explorée de part et d'autre du verbe.
@@ -52,12 +57,33 @@ fn normalize(text: &str) -> String {
         .to_string()
 }
 
+/// Vrai si le jeton est un pronom réfléchi objet préverbal (marque d'une
+/// construction pronominale, déléguée à `rules::pronominal_participle`).
+fn is_reflexive(text: &str) -> bool {
+    matches!(
+        normalize(text).as_str(),
+        "se" | "s" | "me" | "m" | "te" | "t" | "nous" | "vous"
+    )
+}
+
 /// Vrai si le jeton est un clitique préverbal (négation ou pronom).
 fn is_clitic(text: &str) -> bool {
     matches!(
         normalize(text).as_str(),
-        "ne" | "n" | "me" | "m" | "te" | "t" | "se" | "s" | "le" | "la" | "les" | "lui" | "leur"
-            | "y" | "en"
+        "ne" | "n"
+            | "me"
+            | "m"
+            | "te"
+            | "t"
+            | "se"
+            | "s"
+            | "le"
+            | "la"
+            | "les"
+            | "lui"
+            | "leur"
+            | "y"
+            | "en"
     )
 }
 
@@ -175,6 +201,14 @@ impl Rule for AttributeAdjectiveAgreement {
                     continue;
                 };
 
+                // Construction pronominale (« elle s'est levé ») : le réfléchi
+                // précède immédiatement l'auxiliaire « être » ; on délègue à
+                // `rules::pronominal_participle` (accord avec le sujet, garde du
+                // COD postposé) plutôt que de traiter le participe en attribut.
+                if k > 0 && is_reflexive(&lex[k - 1].1.text) {
+                    continue;
+                }
+
                 // --- Sujet : reculer en sautant clitiques et adjectifs. ---
                 let mut s = k;
                 let mut steps = 0;
@@ -225,7 +259,8 @@ impl Rule for AttributeAdjectiveAgreement {
                     .iter()
                     .filter(|m| m.category == MorphCategory::Adjective)
                     .collect();
-                let participles: Vec<&Morph> = analyses.iter().filter(|m| is_participle(m)).collect();
+                let participles: Vec<&Morph> =
+                    analyses.iter().filter(|m| is_participle(m)).collect();
                 if adjectives.is_empty() && participles.is_empty() {
                     continue;
                 }

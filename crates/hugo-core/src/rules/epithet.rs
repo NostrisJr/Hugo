@@ -17,6 +17,7 @@
 
 use super::{lexical_sentences, Rule};
 use crate::morpho::{self, Gender, MorphCategory, Number};
+use crate::pos::{Tagged, Upos};
 use crate::tokenizer::Token;
 use crate::Suggestion;
 
@@ -63,8 +64,11 @@ fn match_case(original: &str, replacement: &str) -> String {
     }
 }
 
-impl Rule for EpithetAdjectiveAgreement {
-    fn check(&self, tokens: &[Token]) -> Vec<Suggestion> {
+impl EpithetAdjectiveAgreement {
+    /// Cœur de la règle. `noun_ok(idx)` valide qu'un candidat nom tête (d'index
+    /// d'origine `idx`) en est bien un — filtre POS optionnel, qui évite les
+    /// homographes nom/verbe comme « est » (l'Est, mais ici l'auxiliaire être).
+    fn run(&self, tokens: &[Token], noun_ok: impl Fn(usize) -> bool) -> Vec<Suggestion> {
         let mut suggestions = Vec::new();
 
         for lex in lexical_sentences(tokens) {
@@ -85,13 +89,14 @@ impl Rule for EpithetAdjectiveAgreement {
 
                 // Nom tête adjacent : antéposé (nom suivant) ou postposé (nom
                 // précédent), dans cet ordre de priorité.
-                let noun_token = if a + 1 < lex.len() && is_noun(lex[a + 1].1) {
-                    lex[a + 1].1
-                } else if a > 0 && is_noun(lex[a - 1].1) {
-                    lex[a - 1].1
-                } else {
-                    continue;
-                };
+                let noun_token =
+                    if a + 1 < lex.len() && is_noun(lex[a + 1].1) && noun_ok(lex[a + 1].0) {
+                        lex[a + 1].1
+                    } else if a > 0 && is_noun(lex[a - 1].1) && noun_ok(lex[a - 1].0) {
+                        lex[a - 1].1
+                    } else {
+                        continue;
+                    };
 
                 let nouns: Vec<_> = morpho::lookup(&noun_token.text)
                     .into_iter()
@@ -116,7 +121,8 @@ impl Rule for EpithetAdjectiveAgreement {
                 let agrees = adjectives.iter().any(|m| {
                     m.gender
                         .map_or(true, |g| g == gender || g == Gender::Epicene)
-                        && m.number.map_or(true, |n| n == number || n == Number::Invariable)
+                        && m.number
+                            .map_or(true, |n| n == number || n == Number::Invariable)
                 });
                 if agrees {
                     continue;
@@ -151,6 +157,18 @@ impl Rule for EpithetAdjectiveAgreement {
         }
 
         suggestions
+    }
+}
+
+impl Rule for EpithetAdjectiveAgreement {
+    fn check(&self, tokens: &[Token]) -> Vec<Suggestion> {
+        self.run(tokens, |_| true)
+    }
+
+    fn check_tagged(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
+        self.run(tokens, |idx| {
+            matches!(tags[idx].upos, Upos::Noun | Upos::Propn)
+        })
     }
 
     fn name(&self) -> &'static str {

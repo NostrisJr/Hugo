@@ -7,6 +7,7 @@ members = [
     "crates/hugo-tauri",
     "tools/compile-morpho",
     "tools/compile-dict",
+    "tools/train-crf",
 ]
 
 [workspace.package]
