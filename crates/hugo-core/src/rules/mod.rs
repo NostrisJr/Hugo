@@ -4,18 +4,23 @@
 //! [`Token`]s d'un texte et renvoie les [`Suggestion`]s détectées. Le
 //! [`Checker`](crate::Checker) agrège les résultats de [`all_rules`].
 //!
-//! Les règles d'accord ([`agreement`], [`conjugation`]) et d'homophonie
-//! ([`homophones`]) reposeront sur l'analyse morphologique ; elles sont pour
-//! l'instant à l'état de stubs. Les règles purement positionnelles
-//! ([`duplicates`], [`capitalization`]) sont déjà fonctionnelles.
+//! Les règles d'accord ([`agreement`], [`conjugation`], [`attribute`]) et
+//! d'homophonie ([`homophones`]) reposent sur l'analyse morphologique
+//! ([`crate::morpho`]). Les règles purement positionnelles ([`duplicates`],
+//! [`capitalization`]) n'en dépendent pas.
+//!
+//! Les règles qui inspectent le voisinage d'un mot raisonnent **par phrase**
+//! via [`lexical_sentences`], afin que le dernier mot d'une phrase ne soit pas
+//! pris pour le voisin du premier mot de la suivante.
 
 pub mod agreement;
+pub mod attribute;
 pub mod capitalization;
 pub mod conjugation;
 pub mod duplicates;
 pub mod homophones;
 
-use crate::tokenizer::Token;
+use crate::tokenizer::{Token, TokenKind};
 use crate::Suggestion;
 
 /// Une règle de correction grammaticale.
@@ -40,6 +45,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(capitalization::CapitalizationAfterPeriod),
         Box::new(agreement::DeterminerNounAgreement),
         Box::new(conjugation::SubjectVerbAgreement),
+        Box::new(attribute::AttributeAdjectiveAgreement),
         Box::new(homophones::HomophoneRule),
     ]
 }
@@ -53,6 +59,39 @@ pub(crate) fn lexical_tokens(tokens: &[Token]) -> Vec<(usize, &Token)> {
         .enumerate()
         .filter(|(_, t)| t.is_lexical())
         .collect()
+}
+
+/// Vrai si le jeton est une ponctuation marquant une frontière de phrase
+/// (point, point d'exclamation/d'interrogation, points de suspension,
+/// point-virgule, deux-points).
+fn is_sentence_terminator(token: &Token) -> bool {
+    token.kind == TokenKind::Punctuation
+        && matches!(token.text.as_str(), "." | "!" | "?" | "…" | ";" | ":")
+}
+
+/// Découpe les tokens en phrases, et renvoie pour chacune ses jetons lexicaux
+/// (avec leur index d'origine, comme [`lexical_tokens`]).
+///
+/// Les règles qui inspectent le **jeton précédent** (sujet, préposition…)
+/// doivent raisonner par phrase : sans cela, le dernier mot d'une phrase
+/// « fuit » sur la première de la suivante (« Il dort. Les chats… » verrait
+/// « dort » comme voisin de « Les »). Les segments vides sont omis.
+pub(crate) fn lexical_sentences(tokens: &[Token]) -> Vec<Vec<(usize, &Token)>> {
+    let mut sentences = Vec::new();
+    let mut current = Vec::new();
+    for (i, token) in tokens.iter().enumerate() {
+        if is_sentence_terminator(token) {
+            if !current.is_empty() {
+                sentences.push(std::mem::take(&mut current));
+            }
+        } else if token.is_lexical() {
+            current.push((i, token));
+        }
+    }
+    if !current.is_empty() {
+        sentences.push(current);
+    }
+    sentences
 }
 
 #[cfg(test)]
@@ -75,5 +114,31 @@ mod tests {
         let lex = lexical_tokens(&tokens);
         let texts: Vec<&str> = lex.iter().map(|(_, t)| t.text.as_str()).collect();
         assert_eq!(texts, vec!["Le", "chat", "lui"]);
+    }
+
+    #[test]
+    fn lexical_sentences_splits_on_terminators() {
+        let tokens = crate::tokenizer::tokenize("Il dort. Les chats mangent !");
+        let sentences = lexical_sentences(&tokens);
+        let texts: Vec<Vec<&str>> = sentences
+            .iter()
+            .map(|s| s.iter().map(|(_, t)| t.text.as_str()).collect())
+            .collect();
+        assert_eq!(
+            texts,
+            vec![vec!["Il", "dort"], vec!["Les", "chats", "mangent"]]
+        );
+    }
+
+    #[test]
+    fn lexical_sentences_preserve_origin_index() {
+        let tokens = crate::tokenizer::tokenize("Le chat dort.");
+        let sentences = lexical_sentences(&tokens);
+        // Les index renvoyés pointent dans la tranche d'origine.
+        for sentence in &sentences {
+            for &(i, t) in sentence {
+                assert_eq!(&tokens[i], t);
+            }
+        }
     }
 }

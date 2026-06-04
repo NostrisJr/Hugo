@@ -21,17 +21,23 @@ Fonctionnel aujourd'hui :
 - ✅ Règle « majuscule après ponctuation terminale »
 - ✅ **Correcteur orthographique** : 449 k formes Dicollecte compilées en FST (581 Ko)
   **embarqué** dans la bibliothèque ; détection des mots inconnus et suggestions
-  par automate de Levenshtein reclassées en Damerau-Levenshtein
+  par automate de Levenshtein, reclassées par distance de Damerau-Levenshtein
+  **et fréquence lexicale** (Lexique383, corpus livres)
+- ✅ **Morphologie** : 125 k formes (catégorie, genre, nombre, lemme) issues de
+  Lexique383, compilées en FST + blob (~2,5 Mo) embarqués
+- ✅ **Accord déterminant–nom** (genre et nombre) : « un belle table » → « une »,
+  « les chat » → « le », « le chats » → « les »
+- ✅ **Accord sujet–verbe** (sujets pronoms) : « ils mange » → « mangent »,
+  « tu mange » → « manges » ; correction engendrée par conjugaison du lemme
 - ✅ Plugin Tauri v2 (`check_text`), bindings C FFI et WASM fonctionnels
 
 À venir :
 
-- ⏳ Compilation du Lefff en FST (morphologie) — `tools/compile-lefff`
-- ⏳ Règles d'accord (déterminant–nom, sujet–verbe) et homophones (phase 2)
-- ⏳ Fréquences lexicales pour le tri des suggestions
+- ⏳ Accord sujet–verbe avec sujets nominaux (« les chats mange »)
+- ⏳ Accord de l'adjectif attribut et homophones grammaticaux (a/à, son/sont…)
 - ⏳ CRF de désambiguïsation POS (phase 4)
 
-Démo : `cargo run --example check -- "les maison son belle. il dort dans dans."`
+Démo : `cargo run --example check -- "Ils mange un belle table. Tu mange une pome."`
 
 Voir [`ROADMAP.md`](ROADMAP.md) pour le détail des phases.
 
@@ -47,11 +53,11 @@ hugo/
 │   ├── hugo-wasm/     Bindings WebAssembly — JS/TS (paquet npm hugo-wasm)
 │   └── hugo-tauri/    Plugin Tauri v2 (commande check_text)
 └── tools/
-    ├── compile-lefff/ Lefff (TSV) → lefff.fst (à venir)
-    └── compile-dict/  Dicollecte (.dic/.aff Hunspell) → dicollecte.fst
+    ├── compile-morpho/ Lexique383 (TSV) → morpho.fst + morpho.bin
+    └── compile-dict/   Dicollecte (.dic/.aff Hunspell) → dicollecte.fst
 ```
 
-Le pipeline de `hugo-core` : `texte → tokenizer → (morpho) → règles + orthographe → suggestions`.
+Le pipeline de `hugo-core` : `texte → tokenizer → morpho → règles + orthographe → suggestions`.
 
 ### Régénérer le dictionnaire orthographique
 
@@ -65,6 +71,15 @@ curl -sSL -o fr.dic https://raw.githubusercontent.com/LibreOffice/dictionaries/m
 
 # 2. Développer les affixes et compiler le FST
 cargo run -p compile-dict --release -- fr.dic fr.aff crates/hugo-core/assets/dicollecte.fst
+```
+
+### Régénérer le lexique morphologique
+
+Les assets `morpho.fst`/`morpho.bin` sont dérivés de Lexique383 (CC BY-SA 4.0) :
+
+```sh
+curl -sSL -o Lexique383.tsv http://www.lexique.org/databases/Lexique383/Lexique383.tsv
+cargo run -p compile-morpho --release -- Lexique383.tsv crates/hugo-core/assets/morpho
 ```
 
 ## Utilisation
@@ -101,8 +116,12 @@ tauri::Builder::default()
 
 ```js
 import { invoke } from "@tauri-apps/api/core";
-const suggestions = await invoke("plugin:hugo|check_text", { text });
+const suggestions = await invoke("plugin:hugo-tauri|check_text", { text });
 ```
+
+> N'oubliez pas d'accorder la permission `hugo-tauri:allow-check-text` dans votre
+> capability. **Guide complet** : [`docs/tauri-integration.md`](docs/tauri-integration.md)
+> (dépendance, ACL, types TypeScript, dépannage).
 
 ## Développement
 
@@ -117,10 +136,12 @@ cargo build -p hugo-wasm --target wasm32-unknown-unknown   # cible web
 
 | Ressource          | Licence       | Usage                         |
 |--------------------|---------------|-------------------------------|
-| Lefff              | LGPL-LR       | Morphologie                   |
+| Lexique383         | CC BY-SA 4.0  | Morphologie (genre, nombre…)  |
 | Dicollecte fr_FR   | MPL 2.0       | Orthographe                   |
 | UD French-GSD      | CC BY-SA 4.0  | Entraînement CRF (phase 4)    |
 | LanguageTool fr    | LGPL 2.1      | Inspiration (réécriture Rust) |
+
+Voir [`NOTICE.md`](NOTICE.md) pour les attributions complètes des données embarquées.
 
 ## Licence
 

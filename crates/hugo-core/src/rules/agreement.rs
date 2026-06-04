@@ -1,21 +1,225 @@
 //! Règle : accord déterminant–nom (genre et nombre).
 //!
-//! **Stub** (phase 2) : nécessitera l'analyse morphologique du Lefff pour
-//! comparer genre et nombre du déterminant et du nom. Renvoie pour l'instant
-//! une liste vide.
+//! Approche prudente, pensée pour minimiser les faux positifs :
+//!
+//! - on ne part que d'un **déterminant d'une classe fermée** connue (articles
+//!   indéfinis/définis, démonstratifs) — les possessifs (`son`, `leur`…), trop
+//!   homographes, sont écartés ;
+//! - on cherche le **nom tête** en sautant les adjectifs antéposés ;
+//! - on corrige **le déterminant** d'après le genre/nombre du nom (le genre
+//!   d'un nom est inhérent), et on ne propose rien si ce genre est inconnu.
+//!
+//! Exemples : « un belle table » → « une », « les chat » → « le »,
+//! « le chats » → « les ».
 
-use super::Rule;
+use super::{lexical_tokens, Rule};
+use crate::morpho::{self, Gender, MorphCategory, Number};
 use crate::tokenizer::Token;
 use crate::Suggestion;
 
+/// Famille de déterminant (détermine les formes de correction).
+#[derive(Clone, Copy)]
+enum Family {
+    Indefinite,
+    Definite,
+    Demonstrative,
+    /// Article partitif / contracté avec *de* : du / de la / de l' / des.
+    PartitiveDe,
+    /// Article contracté avec *à* : au / à la / à l' / aux.
+    ContractedA,
+}
+
+/// Contrainte de genre portée par un déterminant.
+#[derive(Clone, Copy, PartialEq)]
+enum GenderC {
+    Masc,
+    Fem,
+    Any,
+}
+
+/// Description d'un déterminant connu.
+struct DetInfo {
+    family: Family,
+    gender: GenderC,
+    /// Nombre du déterminant (les déterminants de la table sont soit
+    /// singuliers, soit pluriels).
+    plural: bool,
+}
+
+/// Reconnaît un déterminant de la classe fermée traitée.
+fn classify(form_lower: &str) -> Option<DetInfo> {
+    use Family::*;
+    use GenderC::*;
+    let (family, gender, plural) = match form_lower {
+        "un" => (Indefinite, Masc, false),
+        "une" => (Indefinite, Fem, false),
+        "des" => (Indefinite, Any, true),
+        "le" => (Definite, Masc, false),
+        "la" => (Definite, Fem, false),
+        "les" => (Definite, Any, true),
+        "ce" | "cet" => (Demonstrative, Masc, false),
+        "cette" => (Demonstrative, Fem, false),
+        "ces" => (Demonstrative, Any, true),
+        // Articles contractés (un seul jeton ; le féminin se corrige en deux
+        // mots : « du » → « de la », « au » → « à la »).
+        "du" => (PartitiveDe, Masc, false),
+        "au" => (ContractedA, Masc, false),
+        "aux" => (ContractedA, Any, true),
+        _ => return None,
+    };
+    Some(DetInfo {
+        family,
+        gender,
+        plural,
+    })
+}
+
+/// Forme correcte du déterminant pour un genre/nombre cibles.
+///
+/// Renvoie `None` au singulier quand le genre est indéterminé (impossible de
+/// choisir entre « le » et « la »).
+fn corrected_form(family: Family, gender: Option<Gender>, plural: bool) -> Option<&'static str> {
+    if plural {
+        return Some(match family {
+            Family::Indefinite => "des",
+            Family::Definite => "les",
+            Family::Demonstrative => "ces",
+            Family::PartitiveDe => "des",
+            Family::ContractedA => "aux",
+        });
+    }
+    match gender? {
+        Gender::Masculine => Some(match family {
+            Family::Indefinite => "un",
+            Family::Definite => "le",
+            Family::Demonstrative => "ce",
+            Family::PartitiveDe => "du",
+            Family::ContractedA => "au",
+        }),
+        Gender::Feminine => Some(match family {
+            Family::Indefinite => "une",
+            Family::Definite => "la",
+            Family::Demonstrative => "cette",
+            Family::PartitiveDe => "de la",
+            Family::ContractedA => "à la",
+        }),
+        Gender::Epicene => None,
+    }
+}
+
+/// Valeur unique d'un trait à travers les analyses « nom », ou `None` si
+/// absente ou ambiguë.
+fn consensus<T: PartialEq + Copy>(values: impl Iterator<Item = Option<T>>) -> Option<T> {
+    let mut found: Option<T> = None;
+    for v in values.flatten() {
+        match found {
+            None => found = Some(v),
+            Some(prev) if prev == v => {}
+            Some(_) => return None, // contradiction → indéterminé
+        }
+    }
+    found
+}
+
+/// Calque la casse de `original` (initiale) sur `replacement`.
+fn match_case(original: &str, replacement: &str) -> String {
+    let starts_upper = original.chars().next().is_some_and(|c| c.is_uppercase());
+    if !starts_upper {
+        return replacement.to_string();
+    }
+    let mut chars = replacement.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => replacement.to_string(),
+    }
+}
+
 /// Vérifie l'accord en genre et en nombre entre un déterminant et le nom qu'il
-/// introduit (« un belle maison » → « une belle maison »).
+/// introduit.
 pub struct DeterminerNounAgreement;
 
+const RULE_ID: &str = "determiner_noun_agreement";
+
+/// Nombre maximal d'adjectifs antéposés sautés entre le déterminant et le nom.
+const MAX_PRENOMINAL: usize = 3;
+
 impl Rule for DeterminerNounAgreement {
-    fn check(&self, _tokens: &[Token]) -> Vec<Suggestion> {
-        // TODO(phase 2) : implémenter avec la morphologie du Lefff.
-        Vec::new()
+    fn check(&self, tokens: &[Token]) -> Vec<Suggestion> {
+        let lex = lexical_tokens(tokens);
+        let mut suggestions = Vec::new();
+
+        for i in 0..lex.len() {
+            let det_token = lex[i].1;
+            let det_lower = det_token.text.to_lowercase();
+            let Some(det) = classify(&det_lower) else {
+                continue;
+            };
+
+            // Rechercher le nom tête : sauter les adjectifs antéposés.
+            let mut head: Option<&Token> = None;
+            let mut steps = 0;
+            let mut k = i + 1;
+            while k < lex.len() && steps <= MAX_PRENOMINAL {
+                let analyses = morpho::lookup(&lex[k].1.text);
+                let has_noun = analyses.iter().any(|m| m.category == MorphCategory::Noun);
+                let has_adj = analyses
+                    .iter()
+                    .any(|m| m.category == MorphCategory::Adjective);
+                if has_noun {
+                    head = Some(lex[k].1);
+                    break;
+                }
+                if has_adj {
+                    k += 1;
+                    steps += 1;
+                    continue;
+                }
+                break; // ni nom ni adjectif → on arrête
+            }
+
+            let Some(noun) = head else { continue };
+            let noun_analyses: Vec<_> = morpho::lookup(&noun.text)
+                .into_iter()
+                .filter(|m| m.category == MorphCategory::Noun)
+                .collect();
+
+            let noun_gender = consensus(noun_analyses.iter().map(|m| m.gender));
+            let noun_number = consensus(noun_analyses.iter().map(|m| m.number));
+
+            // Genre/nombre cibles : ceux du nom s'ils sont connus, sinon ceux
+            // du déterminant (auquel cas la correction restera identique).
+            let det_gender = match det.gender {
+                GenderC::Masc => Some(Gender::Masculine),
+                GenderC::Fem => Some(Gender::Feminine),
+                GenderC::Any => None,
+            };
+            let target_gender = noun_gender.or(det_gender);
+            let target_plural = match noun_number {
+                Some(Number::Singular) => false,
+                Some(Number::Plural) => true,
+                _ => det.plural,
+            };
+
+            let Some(corrected) = corrected_form(det.family, target_gender, target_plural) else {
+                continue;
+            };
+            if corrected.eq_ignore_ascii_case(&det_lower) {
+                continue; // déjà accordé
+            }
+
+            let replacement = match_case(&det_token.text, corrected);
+            suggestions.push(Suggestion {
+                span: det_token.span,
+                message: format!(
+                    "Accord déterminant–nom : « {} » ne s'accorde pas avec « {} ».",
+                    det_token.text, noun.text
+                ),
+                replacements: vec![replacement],
+                rule_id: RULE_ID,
+            });
+        }
+
+        suggestions
     }
 
     fn name(&self) -> &'static str {
@@ -23,7 +227,7 @@ impl Rule for DeterminerNounAgreement {
     }
 
     fn id(&self) -> &'static str {
-        "determiner_noun_agreement"
+        RULE_ID
     }
 }
 
@@ -32,9 +236,105 @@ mod tests {
     use super::*;
     use crate::tokenizer::tokenize;
 
+    fn replacements(text: &str) -> Vec<(String, Vec<String>)> {
+        DeterminerNounAgreement
+            .check(&tokenize(text))
+            .into_iter()
+            .map(|s| (s.message, s.replacements))
+            .collect()
+    }
+
+    fn first_replacement(text: &str) -> Option<String> {
+        DeterminerNounAgreement
+            .check(&tokenize(text))
+            .into_iter()
+            .next()
+            .and_then(|s| s.replacements.into_iter().next())
+    }
+
     #[test]
-    fn stub_returns_empty() {
-        let tokens = tokenize("un belle maison");
-        assert!(DeterminerNounAgreement.check(&tokens).is_empty());
+    fn gender_mismatch_corrects_determiner() {
+        // « un table » → « une » (table est féminin).
+        assert_eq!(first_replacement("un table").as_deref(), Some("une"));
+    }
+
+    #[test]
+    fn gender_mismatch_with_prenominal_adjective() {
+        // « un belle table » → « une ».
+        assert_eq!(first_replacement("un belle table").as_deref(), Some("une"));
+    }
+
+    #[test]
+    fn number_mismatch_singular_to_plural() {
+        // « le chats » → « les ».
+        assert_eq!(first_replacement("le chats").as_deref(), Some("les"));
+    }
+
+    #[test]
+    fn number_mismatch_plural_to_singular() {
+        // « les chat » → « le » (chat est masculin singulier).
+        assert_eq!(first_replacement("les chat").as_deref(), Some("le"));
+    }
+
+    #[test]
+    fn correct_phrases_yield_nothing() {
+        for ok in ["la table", "le chat", "les chats", "une table", "des chats"] {
+            assert!(
+                replacements(ok).is_empty(),
+                "faux positif sur « {ok} » : {:?}",
+                replacements(ok)
+            );
+        }
+    }
+
+    #[test]
+    fn pronoun_le_before_verb_is_ignored() {
+        // « je le mange » : « le » est pronom, suivi d'un verbe, pas d'un nom.
+        assert!(replacements("je le mange").is_empty());
+    }
+
+    #[test]
+    fn preserves_capitalization() {
+        // En début de phrase : « Un table » → « Une ».
+        assert_eq!(first_replacement("Un table").as_deref(), Some("Une"));
+    }
+
+    #[test]
+    fn unknown_gender_noun_is_not_flagged() {
+        // « maison » a un genre vide dans Lexique : pas de fausse alerte.
+        assert!(replacements("un maison").is_empty());
+    }
+
+    // --- Déterminants composés / contractés. ---
+
+    #[test]
+    fn partitive_gender_mismatch_is_two_words() {
+        // « du table » → « de la » (table est féminin).
+        assert_eq!(first_replacement("du table").as_deref(), Some("de la"));
+    }
+
+    #[test]
+    fn contracted_a_gender_mismatch_is_two_words() {
+        // « au table » → « à la ».
+        assert_eq!(first_replacement("au table").as_deref(), Some("à la"));
+    }
+
+    #[test]
+    fn contracted_number_mismatch() {
+        // « au chats » → « aux » (chats est pluriel).
+        assert_eq!(first_replacement("au chats").as_deref(), Some("aux"));
+        // « aux chat » → « au » (chat est masculin singulier).
+        assert_eq!(first_replacement("aux chat").as_deref(), Some("au"));
+    }
+
+    #[test]
+    fn correct_composed_determiners_are_silent() {
+        for ok in ["du pain", "au chat", "aux chats", "de la table"] {
+            assert!(
+                replacements(ok).is_empty(),
+                "faux positif sur « {ok} » : {:?}",
+                replacements(ok)
+            );
+        }
     }
 }

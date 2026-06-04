@@ -6,8 +6,8 @@ Cargo.lock.orig
 # Données compilées (générées par tools/, non versionnées)
 *.fst
 *.dawg
-# … sauf l'asset orthographique embarqué par hugo-core (POC)
-!crates/hugo-core/assets/dicollecte.fst
+# … sauf les assets embarqués par hugo-core (POC)
+!crates/hugo-core/assets/*.fst
 
 # Sources de données brutes (à télécharger, non redistribuées)
 /data

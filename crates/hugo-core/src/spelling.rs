@@ -78,20 +78,21 @@ impl SpellChecker {
             }
         }
 
-        // Reclassement par distance de Damerau-Levenshtein (qui valorise les
-        // transpositions, fréquentes en frappe), puis : on défavorise les noms
-        // propres (initiale majuscule) face à un mot tapé en minuscules, puis
-        // proximité de longueur, puis ordre alphabétique.
-        // NB : à distances égales, un classement par fréquence lexicale serait
-        // idéal — prévu dans une itération ultérieure.
+        // Reclassement : d'abord la distance de Damerau-Levenshtein (qui
+        // valorise les transpositions, fréquentes en frappe) ; on défavorise
+        // les noms propres (initiale majuscule) face à un mot tapé en
+        // minuscules ; puis, à distance égale, on préfère la forme la plus
+        // fréquente (Lexique383) ; enfin proximité de longueur et ordre
+        // alphabétique départagent.
         let query_is_lower = query == word;
         candidates.sort_by_cached_key(|c| {
             let cand_chars: Vec<char> = c.to_lowercase().chars().collect();
             let dist = damerau_levenshtein(&query_chars, &cand_chars);
             let proper_noun_penalty =
                 u8::from(query_is_lower && c.chars().next().is_some_and(|ch| ch.is_uppercase()));
+            let freq_rank = std::cmp::Reverse(crate::morpho::frequency(c));
             let len_diff = cand_chars.len().abs_diff(query_chars.len());
-            (dist, proper_noun_penalty, len_diff, c.clone())
+            (dist, proper_noun_penalty, freq_rank, len_diff, c.clone())
         });
 
         // Déduplication insensible à la casse (on conserve la première
@@ -192,6 +193,20 @@ mod tests {
             sugg.contains(&"chien".to_string()),
             "suggestions = {sugg:?}"
         );
+    }
+
+    #[test]
+    fn frequency_promotes_common_word() {
+        let sc = SpellChecker::new();
+        // Restitution d'accent : « velo » → « vélo » en tête (forme fréquente),
+        // devant « velu », « veto »…
+        let sugg = sc.suggest("velo", 5);
+        assert_eq!(sugg.first().map(String::as_str), Some("vélo"), "{sugg:?}");
+
+        // « pome » : « pomme » remonte dans le trio de tête grâce à la fréquence
+        // (sans la fréquence, il était plus bas, noyé parmi les voisins).
+        let sugg = sc.suggest("pome", 3);
+        assert!(sugg.iter().any(|s| s == "pomme"), "{sugg:?}");
     }
 
     #[test]

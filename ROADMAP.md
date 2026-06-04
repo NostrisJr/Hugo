@@ -68,27 +68,38 @@ Livrer une bibliothèque Rust autonome capable de :
 
 **Objectif** : 5 règles d'accord fondamentales fonctionnelles grâce à la morphologie du Lefff.
 
-- [ ] **Moteur de règles** : fenêtre glissante sur tokens annotés
-- [ ] **Accord déterminant–nom**
-  - [ ] Genre : "un belle maison" → "une belle maison"
-  - [ ] Nombre : "les chat" → "les chats"
-  - [ ] Gestion des déterminants composés (de la, du, des)
-- [ ] **Accord sujet–verbe**
-  - [ ] Personne + nombre : "ils mange" → "ils mangent"
-  - [ ] Gestion des inversions : "mange-t-il" ne doit pas déclencher
-  - [ ] Sujets composés : "Pierre et Marie mangent"
-- [ ] **Accord adjectif attribut**
-  - [ ] "elle est content" → "elle est contente"
-  - [ ] Gestion de être, sembler, paraître, devenir, rester
-- [ ] **Homophones grammaticaux — fréquents**
-  - [ ] a/à : "il va a Paris" → "il va à Paris"
-  - [ ] ou/où : "je sais ou il est" → "je sais où il est"
-  - [ ] ce/se : "il ce lève" → "il se lève"
-  - [ ] mes/mais : "mes je ne sais pas" → "mais je ne sais pas"
-  - [ ] son/sont : "il son parti" → "ils sont partis"
-  - [ ] on/ont : "ils on mangé" → "ils ont mangé"
-- [ ] **Suite de tests grammaticaux** : corpus de phrases annotées (correct / incorrect / correction attendue)
-- [ ] Benchmark de performance : <5 ms par phrase de 20 mots
+- [x] **Moteur de règles** : fenêtre glissante par phrase (`lexical_sentences`) sur tokens annotés
+- [x] **Accord déterminant–nom** (`rules::agreement`)
+  - [x] Genre : "un belle table" → "une belle table"
+  - [x] Nombre : "les chat" → "les chats"
+  - [x] Déterminants contractés : "du table" → "de la", "aux chat" → "au"
+- [x] **Accord sujet–verbe** (`rules::conjugation`)
+  - [x] Personne + nombre, sujets pronominaux : "ils mange" → "ils mangent"
+  - [x] Sujets nominaux : "les chats mange" → "les chats mangent"
+  - [x] Gestion des inversions : "mange-t-il" ne déclenche pas
+  - [x] Garde anti complément d'objet / groupe prépositionnel
+  - [x] Sujets coordonnés : "Pierre et Marie mange" → "mangent" (personne = priorité 1>2>3 : "toi et moi" → nous)
+- [x] **Accord adjectif attribut** (`rules::attribute`)
+  - [x] "elle est content" → "elle est contente" (via `morpho::decline`)
+  - [x] Copules être, sembler, paraître, devenir, rester, demeurer
+  - [x] Sujets pronominaux (il/elle/ils/elles) et nominaux à genre connu
+- [x] **Homophones grammaticaux — fréquents** (`rules::homophones`, heuristiques haute précision)
+  - [x] a/à : "il va a Paris" → "il va à Paris" (et "il à faim" → "a")
+  - [ ] ou/où : nécessite la désambiguïsation POS (phase 4)
+  - [x] ce/se : "il ce lève" → "il se lève" (sens ce→se uniquement)
+  - [x] mes/mais : "mes je ne sais pas" → "mais je ne sais pas"
+  - [x] son/sont : "ils son partis" → "ils sont partis"
+  - [x] on/ont : "ils on mangé" → "ils ont mangé"
+- [x] **Suite de tests grammaticaux** : tests unitaires par règle + corpus
+  annoté d'intégration (`tests/grammar.rs`, cas correct / incorrect / correction).
+- [x] Benchmark de performance : contrôle dans `tests/grammar.rs`
+  (`performance_is_within_budget`), bien en deçà de 5 ms par phrase de ~20 mots.
+
+> **État (phase 2 — terminée)** : les cinq familles de règles
+> d'accord/homophonie sont fonctionnelles et testées (101 tests unitaires + 3
+> tests d'intégration, `cargo clippy` propre). Seuls restent volontairement
+> hors phase 2 les homophones qui exigent un contexte POS riche (ou/où, sens
+> se→ce, sont→son), repoussés à la **phase 4** avec le CRF.
 
 ---
 
@@ -122,11 +133,56 @@ Livrer une bibliothèque Rust autonome capable de :
 
 **Objectif** : CRF pour la désambiguïsation POS + règles nécessitant un contexte syntaxique précis.
 
-- [ ] **CRF (Conditional Random Field)**
+- [ ] **CRF (Conditional Random Field)** — désambiguïsation POS
   - [ ] Entraînement sur Universal Dependencies French-GSD
   - [ ] Modèle compact (~2 MB)
   - [ ] Intégration dans le pipeline entre morpho lookup et moteur de règles
   - [ ] Précision POS cible : >97%
+
+#### Plan d'implémentation du CRF
+
+**Pourquoi.** Aujourd'hui chaque règle lève l'ambiguïté à la main (gardes sur le
+voisinage, lemme unique, listes fermées). Cela plafonne la couverture : « son »
+n'est corrigé qu'après `ils/elles`, « ou/où » et « se/ce » sont hors de portée,
+et l'accord nominal s'arrête au premier homographe. Un **étiqueteur POS** qui
+assigne à chaque token **une** catégorie (sa probabilité maximale dans le
+contexte) remplacerait ces heuristiques par une désambiguïsation globale.
+
+**Architecture cible** (un nouveau crate-outil + un module runtime) :
+
+1. `tools/train-crf` (hors livrable, dépendances libres d'entraînement)
+   - Lecture du CoNLL-U de UD French-GSD (train/dev/test).
+   - Mapping des UPOS UD → notre `MorphCategory`.
+   - **Features par token** (gabarit classique d'étiquetage) : forme brute,
+     minuscule, préfixes/suffixes 1–4, casse/chiffres/ponctuation, et surtout le
+     **sac de catégories possibles issu de `morpho::lookup`** (le CRF tranche
+     entre les analyses que le lexique propose déjà) ; mêmes features décalées à
+     ±1, ±2 ; features de transition (étiquette précédente).
+   - Entraînement L-BFGS + régularisation L2 ; viser >97 % sur le dev.
+   - Sérialisation des poids vers un format binaire compact (`assets/pos.crf`,
+     ~2 MB), quantifié si nécessaire.
+
+2. `crates/hugo-core/src/pos.rs` (runtime, embarqué)
+   - Décodage **Viterbi** linéaire sur la séquence de tokens d'une phrase.
+   - API : `pub fn tag(tokens: &[Token]) -> Vec<MorphCategory>` (ou un
+     `Vec<Tagged>` portant catégorie + traits désambiguïsés).
+   - Chargement paresseux du modèle via `OnceLock`, comme `morpho::instance()`.
+
+3. **Intégration pipeline** (`Checker::check`)
+   - Tokenize → `morpho::lookup` (analyses candidates) → **`pos::tag`**
+     (désambiguïsation) → règles, qui consomment alors une catégorie unique au
+     lieu d'inspecter `Vec<Morph>`.
+   - Étape progressive : exposer un `&[Tagged]` aux règles sans casser l'API
+     `Rule::check(&[Token])` (passer un contexte enrichi, ou stocker les tags
+     dans une structure parallèle indexée par position).
+
+**Critères budget.** Décodage Viterbi O(n · |états|²) ; avec ~12 catégories et
+des phrases courtes, reste très en dessous du budget <5 ms. Vérifier l'empreinte
+du modèle embarqué (cible ~2 MB) et le temps de chargement initial.
+
+**Débloque ensuite.** ou/où, se/ce (sens manquant), sont/son, accord nominal
+au-delà du premier homographe, et l'accord du participe passé (qui suppose de
+distinguer auxiliaire vs. verbe plein).
 - [ ] **Accord du participe passé**
   - [ ] Avec être : "elle est parti" → "elle est partie"
   - [ ] Avec avoir + COD antéposé : "je les ai vu" → "je les ai vus"

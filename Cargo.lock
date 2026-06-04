@@ -339,8 +339,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "compile-lefff"
+name = "compile-morpho"
 version = "0.1.0"
+dependencies = [
+ "fst",
+]
 
 [[package]]
 name = "console_error_panic_hook"

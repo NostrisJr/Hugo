@@ -5,7 +5,7 @@ members = [
     "crates/hugo-ffi",
     "crates/hugo-wasm",
     "crates/hugo-tauri",
-    "tools/compile-lefff",
+    "tools/compile-morpho",
     "tools/compile-dict",
 ]
 

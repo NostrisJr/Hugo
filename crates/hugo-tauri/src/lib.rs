@@ -14,8 +14,13 @@
 //!
 //! ```js
 //! import { invoke } from "@tauri-apps/api/core";
-//! const suggestions = await invoke("plugin:hugo|check_text", { text: "il il mange" });
+//! const suggestions = await invoke("plugin:hugo-tauri|check_text", { text: "il il mange" });
 //! ```
+//!
+//! Le nom d'exécution du plugin (`hugo-tauri`) coïncide volontairement avec le
+//! nom de crate, car c'est ce dernier que `tauri-plugin` utilise comme espace
+//! de noms des permissions ACL (`hugo-tauri:allow-check-text`). Les deux doivent
+//! être identiques pour que la commande soit autorisée.
 
 use hugo_core::Checker;
 use tauri::plugin::{Builder, TauriPlugin};
@@ -55,7 +60,7 @@ fn check_text(text: String, state: tauri::State<'_, Checker>) -> Vec<JsSuggestio
 
 /// Initialise le plugin Hugo.
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
-    Builder::new("hugo")
+    Builder::new("hugo-tauri")
         .invoke_handler(tauri::generate_handler![check_text])
         .setup(|app, _api| {
             app.manage(Checker::new());
