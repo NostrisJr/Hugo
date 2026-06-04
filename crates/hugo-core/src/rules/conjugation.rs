@@ -126,6 +126,49 @@ fn is_finite_verb(text: &str) -> bool {
     !morpho::verb_forms(text).is_empty()
 }
 
+/// Vrai si le jeton d'index `k+1` admet une analyse nominale. Sert à décider
+/// qu'un mot nom/adjectif ambigu (« petit », « principales »…) est en réalité un
+/// adjectif antéposé lorsqu'un nom le suit.
+fn next_is_noun(sentence: &[(usize, &Token)], k: usize) -> bool {
+    sentence.get(k + 1).is_some_and(|(_, t)| {
+        morpho::lookup(&t.text)
+            .iter()
+            .any(|m| m.category == MorphCategory::Noun)
+    })
+}
+
+/// Cherche le nom tête à partir de l'index `start`, en sautant les adjectifs
+/// antéposés (y compris les homographes nom/adjectif suivis d'un autre nom).
+/// Renvoie l'index du nom, ou `None`.
+fn noun_head_from(sentence: &[(usize, &Token)], start: usize) -> Option<usize> {
+    let mut k = start;
+    let mut steps = 0;
+    loop {
+        if k >= sentence.len() || steps > MAX_SKIP {
+            return None;
+        }
+        let analyses = morpho::lookup(&sentence[k].1.text);
+        let has_noun = analyses.iter().any(|m| m.category == MorphCategory::Noun);
+        let has_adj = analyses
+            .iter()
+            .any(|m| m.category == MorphCategory::Adjective);
+        if has_noun {
+            if has_adj && next_is_noun(sentence, k) {
+                k += 1;
+                steps += 1;
+                continue;
+            }
+            return Some(k);
+        }
+        if has_adj {
+            k += 1;
+            steps += 1;
+            continue;
+        }
+        return None;
+    }
+}
+
 /// Vrai si le jeton est analysé comme adjectif sans être par ailleurs un verbe
 /// conjugué (pour ne pas sauter le verbe par mégarde).
 fn is_skippable_adjective(text: &str) -> bool {
@@ -192,27 +235,7 @@ fn detect_subject(sentence: &[(usize, &Token)], i: usize) -> Option<Subject> {
     }
 
     // Chercher le nom tête en sautant les adjectifs antéposés.
-    let mut k = i + 1;
-    let mut steps = 0;
-    let head = loop {
-        if k >= sentence.len() || steps > MAX_SKIP {
-            break None;
-        }
-        let analyses = morpho::lookup(&sentence[k].1.text);
-        if analyses.iter().any(|m| m.category == MorphCategory::Noun) {
-            break Some(k);
-        }
-        if analyses
-            .iter()
-            .any(|m| m.category == MorphCategory::Adjective)
-        {
-            k += 1;
-            steps += 1;
-            continue;
-        }
-        break None;
-    };
-    let head = head?;
+    let head = noun_head_from(sentence, i + 1)?;
 
     Some(Subject {
         person: Person::Third,
@@ -255,26 +278,7 @@ fn parse_conjunct(sentence: &[(usize, &Token)], j: usize) -> Option<(u8, usize, 
     }
     // Groupe nominal : déterminant + adjectifs antéposés + nom tête.
     if determiner_number(&tok.text).is_some() {
-        let mut k = j + 1;
-        let mut steps = 0;
-        loop {
-            if k >= sentence.len() || steps > MAX_SKIP {
-                return None;
-            }
-            let analyses = morpho::lookup(&sentence[k].1.text);
-            if analyses.iter().any(|m| m.category == MorphCategory::Noun) {
-                return Some((3, k, k + 1));
-            }
-            if analyses
-                .iter()
-                .any(|m| m.category == MorphCategory::Adjective)
-            {
-                k += 1;
-                steps += 1;
-                continue;
-            }
-            return None;
-        }
+        return noun_head_from(sentence, j + 1).map(|h| (3, h, h + 1));
     }
     // Nom commun nu.
     if morpho::lookup(&tok.text)
@@ -626,5 +630,19 @@ mod tests {
     fn no_duplicate_for_plural_conjuncts() {
         // Les deux membres pluriels ne doivent pas produire deux suggestions.
         assert_eq!(count("les chats et les chiens mange"), 1);
+    }
+
+    #[test]
+    fn ambiguous_prenominal_noun_head() {
+        // « petit » a une lecture nominale parasite : le vrai sujet est
+        // « chats », et « mange » doit être corrigé.
+        assert_eq!(first("les petit chats mange").as_deref(), Some("mangent"));
+    }
+
+    #[test]
+    fn ambiguous_prenominal_no_false_positive() {
+        // « principales » (nom/adjectif) ne doit pas être pris pour le nom tête :
+        // le sujet est « mesures », « concernent » est déjà accordé.
+        assert_eq!(count("les principales mesures concernent le pays"), 0);
     }
 }

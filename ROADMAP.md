@@ -189,9 +189,14 @@ distinguer auxiliaire vs. verbe plein).
   - [ ] Avec être : "elle est parti" → "elle est partie"
   - [ ] Avec avoir + COD antéposé : "je les ai vu" → "je les ai vus"
   - [ ] Verbes pronominaux : "elle s'est levé" → "elle s'est levée"
-- [ ] **Accord de l'adjectif épithète**
-  - [ ] "une grande maisons" → "de grandes maisons"
-  - [ ] Adjectifs antéposés et postposés
+- [x] **Accord de l'adjectif épithète** (`rules::epithet`)
+  - [x] Adjectifs antéposés et postposés : "les chats noir" → "noirs",
+    "les petit chats" → "petits"
+  - [x] Robustesse aux homographes nom/adjectif (« douce », « principales »…) :
+    correction conjointe dans les règles déterminant–nom et sujet–verbe
+  - [ ] Correction conjointe déterminant + adjectif ("une grande maisons" →
+    "de grandes maisons") — partiellement (adjectif et déterminant corrigés
+    séparément)
 - [ ] **Subjonctif**
   - [ ] Après bien que, pour que, afin que, quoique…
   - [ ] "bien qu'il est" → "bien qu'il soit"

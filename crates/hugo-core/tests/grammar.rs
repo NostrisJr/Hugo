@@ -11,6 +11,7 @@ const GRAMMAR_RULES: &[&str] = &[
     "determiner_noun_agreement",
     "subject_verb_agreement",
     "attribute_adjective_agreement",
+    "epithet_adjective_agreement",
     "homophone",
 ];
 
@@ -43,6 +44,10 @@ const INCORRECT: &[(&str, &str, &str)] = &[
     // Accord de l'attribut.
     ("elle est content", "attribute_adjective_agreement", "contente"),
     ("ils sont content", "attribute_adjective_agreement", "contents"),
+    // Accord de l'adjectif épithète.
+    ("les chats noir", "epithet_adjective_agreement", "noirs"),
+    ("les petit chats", "epithet_adjective_agreement", "petits"),
+    ("un beau table", "epithet_adjective_agreement", "belle"),
     // Homophones.
     ("il va a Paris", "homophone", "à"),
     ("il à faim", "homophone", "a"),
@@ -61,6 +66,9 @@ const CORRECT: &[&str] = &[
     "ils mangent",
     "nous mangeons",
     "les chats noirs dorment",
+    "un beau chat noir",
+    "une belle grande maison",
+    "les petits chats blancs",
     "Pierre et Marie mangent",
     "le chat et le chien dorment",
     "toi et moi sommes là",

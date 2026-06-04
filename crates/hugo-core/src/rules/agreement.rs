@@ -166,6 +166,18 @@ impl Rule for DeterminerNounAgreement {
                     .iter()
                     .any(|m| m.category == MorphCategory::Adjective);
                 if has_noun {
+                    // Un mot à la fois nom et adjectif (« douce », « vieux »…)
+                    // suivi d'un autre nom est en réalité un adjectif antéposé :
+                    // on continue pour atteindre le vrai nom tête.
+                    let next_is_noun = k + 1 < lex.len()
+                        && morpho::lookup(&lex[k + 1].1.text)
+                            .iter()
+                            .any(|m| m.category == MorphCategory::Noun);
+                    if has_adj && next_is_noun {
+                        k += 1;
+                        steps += 1;
+                        continue;
+                    }
                     head = Some(lex[k].1);
                     break;
                 }
@@ -325,6 +337,19 @@ mod tests {
         assert_eq!(first_replacement("au chats").as_deref(), Some("aux"));
         // « aux chat » → « au » (chat est masculin singulier).
         assert_eq!(first_replacement("aux chat").as_deref(), Some("au"));
+    }
+
+    #[test]
+    fn ambiguous_prenominal_adjective_is_skipped() {
+        // « douce »/« vieux » ont une lecture nominale parasite : le vrai nom
+        // tête est celui qui suit. Pas de fausse alerte sur le déterminant.
+        for ok in ["une douce lumière", "le vieux canapé", "une belle grande maison"] {
+            assert!(
+                replacements(ok).is_empty(),
+                "faux positif sur « {ok} » : {:?}",
+                replacements(ok)
+            );
+        }
     }
 
     #[test]
