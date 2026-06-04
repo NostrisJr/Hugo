@@ -107,25 +107,27 @@ Livrer une bibliothèque Rust autonome capable de :
 
 **Objectif** : livrable utilisable par d'autres applications.
 
-- [ ] **Plugin Tauri v2 complet**
-  - [ ] Commande `check_text` avec sérialisation `JsSuggestion`
-  - [ ] `Checker` initialisé une seule fois via `app.manage()`
-  - [ ] Types TypeScript générés (`hugo.d.ts`)
+- [~] **Plugin Tauri v2 complet**
+  - [x] Commande `check_text` avec sérialisation `JsSuggestion`
+  - [x] `Checker` initialisé une seule fois via `app.manage()`
+  - [x] Guide d'intégration ([`docs/tauri-integration.md`](docs/tauri-integration.md), avec types TS fournis)
+  - [ ] Types TypeScript **générés** (`hugo.d.ts`) automatiquement
   - [ ] Exemple d'intégration dans une app Tauri + React
-- [ ] **C FFI**
-  - [ ] `hugo_checker_new()`, `hugo_checker_check()`, `hugo_free_results()`
-  - [ ] Header C généré par `cbindgen`
-  - [ ] Build en `staticlib` pour iOS/macOS
-  - [ ] Package XCFramework pour Swift
-  - [ ] Wrapper Swift (`Hugo.swift`) avec API idiomatique
+- [x] **C FFI**
+  - [x] `hugo_checker_new()`, `hugo_checker_check()`, `hugo_free_results()`
+  - [x] Header C ([`crates/hugo-ffi/include/hugo.h`](crates/hugo-ffi/include/hugo.h)) + `cbindgen.toml` de régénération
+  - [x] Build en `staticlib`/`cdylib` (vérifié par un test C linké, voir `examples/c_demo.c`)
+  - [x] Package XCFramework pour Swift ([`scripts/build-xcframework.sh`](scripts/build-xcframework.sh))
+  - [x] Wrapper Swift ([`crates/hugo-ffi/swift/Hugo.swift`](crates/hugo-ffi/swift/Hugo.swift)) avec API idiomatique
 - [ ] **WASM**
-  - [ ] Build avec `wasm-pack`
-  - [ ] Package npm `hugo-wasm` avec types TypeScript
+  - [x] Bindings `wasm-bindgen` fonctionnels (`HugoChecker`, `check`)
+  - [ ] Build avec `wasm-pack` + package npm `hugo-wasm` (types TypeScript)
   - [ ] Exemple d'utilisation dans une app web
-- [ ] **Documentation**
-  - [ ] rustdoc sur tous les types et fonctions publics
-  - [ ] Guide d'intégration dans le README
-  - [ ] Exemples dans `examples/`
+- [~] **Documentation**
+  - [x] rustdoc sur les types et fonctions publics
+  - [x] Guides d'intégration ([Tauri](docs/tauri-integration.md), [C FFI](docs/c-ffi-integration.md))
+  - [x] Exemples : `crates/hugo-core/examples/check.rs`, `crates/hugo-ffi/examples/c_demo.c`
+  - [ ] Exemple WASM web
 
 ---
 

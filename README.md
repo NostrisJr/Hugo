@@ -123,6 +123,23 @@ const suggestions = await invoke("plugin:hugo-tauri|check_text", { text });
 > capability. **Guide complet** : [`docs/tauri-integration.md`](docs/tauri-integration.md)
 > (dépendance, ACL, types TypeScript, dépannage).
 
+### Intégration native (C, C++, Swift)
+
+```bash
+cargo build -p hugo-ffi --release   # → libhugo_ffi.a / .dylib + include/hugo.h
+```
+
+```c
+HugoChecker *c = hugo_checker_new();
+HugoResults  r = hugo_checker_check(c, "il va a Paris");
+// ... lire r.suggestions[0..r.len] ...
+hugo_free_results(r);
+hugo_checker_free(c);
+```
+
+> **Guide complet** : [`docs/c-ffi-integration.md`](docs/c-ffi-integration.md)
+> (API C, wrapper Swift `Hugo.swift`, XCFramework, JNI, dépannage).
+
 ## Développement
 
 ```bash

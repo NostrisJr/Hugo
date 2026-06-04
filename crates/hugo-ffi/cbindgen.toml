@@ -1,0 +1,20 @@
+# Configuration cbindgen pour régénérer include/hugo.h.
+#
+#   cbindgen --config crates/hugo-ffi/cbindgen.toml \
+#            --crate hugo-ffi \
+#            --output crates/hugo-ffi/include/hugo.h
+
+language = "C"
+header = "/* Généré par cbindgen — ne pas éditer à la main. */"
+include_guard = "HUGO_H"
+pragma_once = false
+cpp_compat = true
+style = "type"
+documentation = true
+documentation_style = "c"
+
+[export]
+prefix = ""
+
+[parse]
+parse_deps = false

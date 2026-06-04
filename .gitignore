@@ -14,8 +14,9 @@ Cargo.lock.orig
 
 # Artefacts d'intégration
 /crates/hugo-wasm/pkg
-/crates/hugo-ffi/include
 *.xcframework
+# Le header C (crates/hugo-ffi/include/hugo.h) est versionné : il sert de
+# référence d'API et se régénère avec cbindgen (voir crates/hugo-ffi/cbindgen.toml).
 
 # OS / éditeurs
 .DS_Store

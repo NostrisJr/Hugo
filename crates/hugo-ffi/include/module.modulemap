@@ -1,0 +1,6 @@
+// Permet d'importer l'API C de Hugo comme un module Swift/Clang (`import CHugo`).
+// Embarqué dans le dossier `headers` du XCFramework.
+module CHugo {
+    header "hugo.h"
+    export *
+}
