@@ -16,7 +16,7 @@
 //!   engendrée par [`morpho::decline`]. Si elle est introuvable, on n'émet rien.
 
 use super::{lexical_sentences, Rule};
-use crate::morpho::{self, Gender, MorphCategory, Number};
+use crate::morpho::{self, Gender, Morph, MorphCategory, Number};
 use crate::tokenizer::Token;
 use crate::Suggestion;
 
@@ -128,6 +128,23 @@ fn subject_features(token: &Token) -> Option<(Gender, Number)> {
     Some((gender, number))
 }
 
+/// Vrai si l'analyse est un participe passé : enregistrement verbal sans
+/// personne, mais porteur d'un genre et d'un nombre (« mangée », « partis »).
+fn is_participle(m: &Morph) -> bool {
+    m.category == MorphCategory::Verb
+        && m.person.is_none()
+        && m.gender.is_some()
+        && m.number.is_some()
+}
+
+/// Lemme commun à toutes ces analyses, ou `None` s'il y en a plusieurs (ou
+/// aucune).
+fn unique_lemma<'a>(analyses: &[&'a Morph]) -> Option<&'a str> {
+    let mut it = analyses.iter().map(|m| m.lemma.as_str());
+    let first = it.next()?;
+    it.all(|l| l == first).then_some(first)
+}
+
 /// Lemme de la copule présente sur ce jeton, le cas échéant.
 fn copula_lemma(token: &Token) -> Option<String> {
     morpho::verb_forms(&token.text)
@@ -199,35 +216,39 @@ impl Rule for AttributeAdjectiveAgreement {
                 }
                 let adj_token = lex[a].1;
 
-                let adjectives: Vec<_> = morpho::lookup(&adj_token.text)
-                    .into_iter()
+                // L'attribut peut être un adjectif (« content ») ou un participe
+                // passé (« parti »), avec la copule « être » : « elle est parti »
+                // → « partie ». Les participes ne sont pas toujours étiquetés
+                // adjectifs dans Lexique, d'où la génération dédiée.
+                let analyses = morpho::lookup(&adj_token.text);
+                let adjectives: Vec<&Morph> = analyses
+                    .iter()
                     .filter(|m| m.category == MorphCategory::Adjective)
                     .collect();
-                if adjectives.is_empty() {
+                let participles: Vec<&Morph> = analyses.iter().filter(|m| is_participle(m)).collect();
+                if adjectives.is_empty() && participles.is_empty() {
                     continue;
                 }
 
-                // Déjà accordé ? (une analyse compatible suffit)
-                let agrees = adjectives.iter().any(|m| {
+                // Déjà accordé ? (un adjectif ou un participe compatible suffit)
+                let agrees = |m: &Morph| {
                     m.gender
                         .map_or(true, |g| g == gender || g == Gender::Epicene)
                         && m.number
                             .map_or(true, |n| n == number || n == Number::Invariable)
-                });
-                if agrees {
+                };
+                if adjectives.iter().any(|m| agrees(m)) || participles.iter().any(|m| agrees(m)) {
                     continue;
                 }
 
-                // Lemme unique (sinon ambiguïté lexicale).
-                let mut lemmas: Vec<&str> = adjectives.iter().map(|m| m.lemma.as_str()).collect();
-                lemmas.sort_unstable();
-                lemmas.dedup();
-                if lemmas.len() != 1 {
-                    continue;
-                }
-                let lemma = adjectives[0].lemma.clone();
-
-                let Some(corrected) = morpho::decline(&lemma, gender, number) else {
+                // Génération : forme adjectivale (decline), sinon participe passé.
+                let corrected = unique_lemma(&adjectives)
+                    .and_then(|l| morpho::decline(l, gender, number))
+                    .or_else(|| {
+                        unique_lemma(&participles)
+                            .and_then(|l| morpho::participle(l, gender, number))
+                    });
+                let Some(corrected) = corrected else {
                     continue;
                 };
                 if corrected.eq_ignore_ascii_case(&adj_token.text) {
@@ -334,5 +355,35 @@ mod tests {
     #[test]
     fn capitalization_preserved() {
         assert_eq!(first("Elle est Content").as_deref(), Some("Contente"));
+    }
+
+    // --- Participe passé avec être. ---
+
+    #[test]
+    fn past_participle_with_etre() {
+        // « elle est parti » → « partie » (participe non étiqueté adjectif).
+        assert_eq!(first("elle est parti").as_deref(), Some("partie"));
+        assert_eq!(first("ils sont parti").as_deref(), Some("partis"));
+        assert_eq!(first("elles sont allé").as_deref(), Some("allées"));
+    }
+
+    #[test]
+    fn past_participle_correct_is_silent() {
+        for ok in [
+            "elle est partie",
+            "ils sont partis",
+            "elles sont allées",
+            "il est parti",
+        ] {
+            assert_eq!(count(ok), 0, "faux positif sur « {ok} »");
+        }
+    }
+
+    #[test]
+    fn avoir_auxiliary_is_not_subject_agreement() {
+        // Avec « avoir », le participe ne s'accorde pas avec le sujet.
+        // « elle a mangé » ne doit rien déclencher.
+        assert_eq!(count("elle a mangé"), 0);
+        assert_eq!(count("ils ont mangé"), 0);
     }
 }

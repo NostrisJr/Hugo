@@ -185,8 +185,10 @@ du modèle embarqué (cible ~2 MB) et le temps de chargement initial.
 **Débloque ensuite.** ou/où, se/ce (sens manquant), sont/son, accord nominal
 au-delà du premier homographe, et l'accord du participe passé (qui suppose de
 distinguer auxiliaire vs. verbe plein).
-- [ ] **Accord du participe passé**
-  - [ ] Avec être : "elle est parti" → "elle est partie"
+- [~] **Accord du participe passé**
+  - [x] Avec être : "elle est parti" → "elle est partie" (`rules::attribute` +
+    `morpho::participle`), y compris sujets nominaux ("les invités sont venu" →
+    "venus")
   - [ ] Avec avoir + COD antéposé : "je les ai vu" → "je les ai vus"
   - [ ] Verbes pronominaux : "elle s'est levé" → "elle s'est levée"
 - [x] **Accord de l'adjectif épithète** (`rules::epithet`)
@@ -202,7 +204,8 @@ distinguer auxiliaire vs. verbe plein).
   - [ ] "bien qu'il est" → "bien qu'il soit"
 - [ ] **Accords spéciaux**
   - [ ] Adjectifs de couleur composés (invariables) : "des robes bleu ciel"
-  - [ ] tout/même/quelque : "toute les jours" → "tous les jours"
+  - [~] tout/même/quelque : "toute les jours" → "tous les jours"
+    (`rules::quantifier` — *tout* fait ; *même*/*quelque* à venir)
   - [ ] Trait d'union dans les nombres composés (post-réforme 1990)
 - [ ] **Port des règles LanguageTool**
   - [ ] Inventaire des règles françaises XML de LanguageTool

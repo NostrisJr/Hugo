@@ -276,6 +276,9 @@ struct Morphology {
     /// construit paresseusement (uniquement si un accord d'adjectif doit être
     /// engendré). Les codes valent 0 lorsque le trait est absent.
     decl: OnceLock<HashMap<(String, u8, u8), String>>,
+    /// Index des participes passés `(lemme, genre, nombre) → forme`, construit
+    /// paresseusement. Le lemme est l'infinitif (« partir » → « partie »).
+    part: OnceLock<HashMap<(String, u8, u8), String>>,
 }
 
 impl Morphology {
@@ -286,6 +289,7 @@ impl Morphology {
             freq: fst::Map::new(MORPHO_FREQ)?,
             gen: OnceLock::new(),
             decl: OnceLock::new(),
+            part: OnceLock::new(),
         })
     }
 
@@ -405,6 +409,48 @@ impl Morphology {
         index
     }
 
+    /// Construit l'index des participes passés en parcourant le FST une fois.
+    /// Un participe passé est un enregistrement verbal **sans personne** mais
+    /// porteur d'un genre et d'un nombre (« mangée », « parties »).
+    fn build_part(&self) -> HashMap<(String, u8, u8), String> {
+        let mut index = HashMap::new();
+        let mut stream = self.map.stream();
+        while let Some((key, value)) = stream.next() {
+            let Ok(form) = std::str::from_utf8(key) else {
+                continue;
+            };
+            let count = (value & 0xFF) as usize;
+            let offset = (value >> 8) as usize;
+            for r in decode_records(self.blob, offset, count) {
+                if decode_category(r.cat) == MorphCategory::Verb
+                    && r.person == 0
+                    && r.gender != 0
+                    && r.number != 0
+                {
+                    index
+                        .entry((r.lemma, r.gender, r.number))
+                        .or_insert_with(|| form.to_string());
+                }
+            }
+        }
+        index
+    }
+
+    fn participle(&self, lemma: &str, gender: Gender, number: Number) -> Option<String> {
+        let g = match gender {
+            Gender::Masculine => 1,
+            Gender::Feminine => 2,
+            Gender::Epicene => return None,
+        };
+        let n = match number {
+            Number::Singular => 1,
+            Number::Plural => 2,
+            Number::Invariable => return None,
+        };
+        let index = self.part.get_or_init(|| self.build_part());
+        index.get(&(lemma.to_string(), g, n)).cloned()
+    }
+
     fn decline(&self, lemma: &str, gender: Gender, number: Number) -> Option<String> {
         let g = match gender {
             Gender::Masculine => 1,
@@ -459,6 +505,14 @@ pub fn conjugate(lemma: &str, mt: MoodTense, person: Person, number: Number) -> 
 /// aucune forme n'est trouvée pour ce lemme.
 pub fn decline(lemma: &str, gender: Gender, number: Number) -> Option<String> {
     instance().decline(lemma, gender, number)
+}
+
+/// Engendre la forme accordée d'un **participe passé** pour un genre et un
+/// nombre donnés (ex. `participle("partir", Feminine, Singular)` → `Some("partie")`,
+/// `participle("manger", Feminine, Singular)` → `Some("mangée")`). Le `lemma`
+/// est l'infinitif. Renvoie `None` si la forme est introuvable.
+pub fn participle(lemma: &str, gender: Gender, number: Number) -> Option<String> {
+    instance().participle(lemma, gender, number)
 }
 
 /// Fréquence lexicale relative d'une forme (occurrences/million × 100, d'après
@@ -582,6 +636,26 @@ mod tests {
         assert_eq!(
             decline("rouge", Gender::Feminine, Number::Plural).as_deref(),
             Some("rouges")
+        );
+    }
+
+    #[test]
+    fn past_participle_generation() {
+        assert_eq!(
+            participle("partir", Gender::Feminine, Number::Singular).as_deref(),
+            Some("partie")
+        );
+        assert_eq!(
+            participle("manger", Gender::Feminine, Number::Singular).as_deref(),
+            Some("mangée")
+        );
+        assert_eq!(
+            participle("aller", Gender::Masculine, Number::Plural).as_deref(),
+            Some("allés")
+        );
+        assert_eq!(
+            participle("venir", Gender::Feminine, Number::Plural).as_deref(),
+            Some("venues")
         );
     }
 

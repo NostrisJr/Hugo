@@ -5,7 +5,7 @@
 //! [`Checker`](crate::Checker) agrège les résultats de [`all_rules`].
 //!
 //! Les règles d'accord ([`agreement`], [`conjugation`], [`attribute`],
-//! [`epithet`]) et d'homophonie ([`homophones`]) reposent sur l'analyse morphologique
+//! [`epithet`], [`quantifier`]) et d'homophonie ([`homophones`]) reposent sur l'analyse morphologique
 //! ([`crate::morpho`]). Les règles purement positionnelles ([`duplicates`],
 //! [`capitalization`]) n'en dépendent pas.
 //!
@@ -20,6 +20,7 @@ pub mod conjugation;
 pub mod duplicates;
 pub mod epithet;
 pub mod homophones;
+pub mod quantifier;
 
 use crate::tokenizer::{Token, TokenKind};
 use crate::Suggestion;
@@ -48,6 +49,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(conjugation::SubjectVerbAgreement),
         Box::new(attribute::AttributeAdjectiveAgreement),
         Box::new(epithet::EpithetAdjectiveAgreement),
+        Box::new(quantifier::ToutAgreement),
         Box::new(homophones::HomophoneRule),
     ]
 }

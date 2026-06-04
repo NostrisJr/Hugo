@@ -12,6 +12,7 @@ const GRAMMAR_RULES: &[&str] = &[
     "subject_verb_agreement",
     "attribute_adjective_agreement",
     "epithet_adjective_agreement",
+    "tout_agreement",
     "homophone",
 ];
 
@@ -48,6 +49,12 @@ const INCORRECT: &[(&str, &str, &str)] = &[
     ("les chats noir", "epithet_adjective_agreement", "noirs"),
     ("les petit chats", "epithet_adjective_agreement", "petits"),
     ("un beau table", "epithet_adjective_agreement", "belle"),
+    // Participe passé avec être.
+    ("elle est parti", "attribute_adjective_agreement", "partie"),
+    ("ils sont allé", "attribute_adjective_agreement", "allés"),
+    // Accord de « tout ».
+    ("toute les jours", "tout_agreement", "tous"),
+    ("tout les semaines", "tout_agreement", "toutes"),
     // Homophones.
     ("il va a Paris", "homophone", "à"),
     ("il à faim", "homophone", "a"),
@@ -81,6 +88,12 @@ const CORRECT: &[&str] = &[
     "il se lève",
     "je vois les chats",
     "Jean dort et Marie mange",
+    "elle est partie",
+    "ils sont allés",
+    "il est venu",
+    "tout le monde est parti",
+    "toutes les semaines",
+    "toute la journée",
 ];
 
 #[test]
