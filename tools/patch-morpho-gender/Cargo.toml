@@ -1,0 +1,14 @@
+[package]
+name = "patch-morpho-gender"
+description = "Applique une liste d'override de genre (noms mono-genre absents de la source) au blob morpho compilé de Hugo."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "patch-morpho-gender"
+path = "src/main.rs"
+
+[dependencies]
+fst = "0.4"

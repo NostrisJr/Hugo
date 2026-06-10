@@ -45,12 +45,21 @@ impl Rule for CapitalizationAfterPeriod {
         let mut last_word: Option<&Token> = None;
         // Vrai si une ponctuation terminale est « en attente » d'un mot.
         let mut terminal_pending = false;
+        // Profondeur de parenthèses ouvertes : une ponctuation terminale à
+        // l'intérieur d'une parenthèse (« (perte, vol, virus…) ») n'est pas une
+        // fin de phrase — la phrase porteuse se poursuit après la parenthèse.
+        let mut paren_depth: usize = 0;
 
         for token in tokens {
             match token.kind {
                 TokenKind::Whitespace => {}
                 TokenKind::Punctuation => {
-                    if TERMINAL_PUNCT.contains(&token.text.as_str()) {
+                    match token.text.as_str() {
+                        "(" => paren_depth += 1,
+                        ")" => paren_depth = paren_depth.saturating_sub(1),
+                        _ => {}
+                    }
+                    if paren_depth == 0 && TERMINAL_PUNCT.contains(&token.text.as_str()) {
                         // Ne pas déclencher si le mot précédent est une
                         // abréviation courante.
                         let after_abbrev =
@@ -141,6 +150,34 @@ mod tests {
     #[test]
     fn test_etc_abbreviation() {
         let tokens = tokenize("des pommes, etc. puis on part");
+        let suggestions = CapitalizationAfterPeriod.check(&tokens);
+        assert_eq!(suggestions.len(), 0);
+    }
+
+    #[test]
+    fn test_ellipsis_inside_parentheses_is_not_terminal() {
+        // « … » dans une parenthèse ne ferme pas la phrase porteuse : « perdu »
+        // ne réclame pas de majuscule.
+        let tokens =
+            tokenize("un employé ayant, pour X raison (perte, vol, virus…) perdu son poste");
+        let suggestions = CapitalizationAfterPeriod.check(&tokens);
+        assert_eq!(suggestions.len(), 0);
+    }
+
+    #[test]
+    fn test_ellipsis_outside_parentheses_still_triggers() {
+        // Hors parenthèse, « … » reste une fin de phrase.
+        let tokens = tokenize("il hésita… puis partit");
+        let suggestions = CapitalizationAfterPeriod.check(&tokens);
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].replacements, vec!["Puis"]);
+    }
+
+    #[test]
+    fn test_terminal_punct_inside_parentheses_is_ignored() {
+        // Un point/point d'exclamation à l'intérieur d'une parenthèse n'impose
+        // pas de majuscule au mot qui suit la parenthèse.
+        let tokens = tokenize("le projet (livré tard !) avance bien");
         let suggestions = CapitalizationAfterPeriod.check(&tokens);
         assert_eq!(suggestions.len(), 0);
     }

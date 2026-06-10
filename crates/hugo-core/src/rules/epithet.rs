@@ -65,15 +65,37 @@ fn match_case(original: &str, replacement: &str) -> String {
 }
 
 impl EpithetAdjectiveAgreement {
-    /// Cœur de la règle. `noun_ok(idx)` valide qu'un candidat nom tête (d'index
-    /// d'origine `idx`) en est bien un — filtre POS optionnel, qui évite les
-    /// homographes nom/verbe comme « est » (l'Est, mais ici l'auxiliaire être).
-    fn run(&self, tokens: &[Token], noun_ok: impl Fn(usize) -> bool) -> Vec<Suggestion> {
+    /// Cœur de la règle.
+    ///
+    /// `adj_ok(idx)` valide que le candidat épithète (d'index d'origine `idx`)
+    /// est bien employé comme adjectif. C'est le filtre POS qui distingue le
+    /// **participe présent** (verbal, invariable : « les champs bruissant sous la
+    /// brise ») de l'**adjectif verbal** homographe (accordable : « des voyages
+    /// fatigants ») — le CRF tague le premier `VERB`, le second `ADJ`. Sans tags,
+    /// le lexique seul ne tranche pas (les deux lectures coexistent) ; le chemin
+    /// non taggé passe alors `|_| true` et reste « meilleur effort ».
+    ///
+    /// `noun_ok(idx)` valide de même qu'un candidat nom tête en est bien un —
+    /// évite les homographes nom/verbe comme « est » (l'Est vs l'auxiliaire être).
+    fn run(
+        &self,
+        tokens: &[Token],
+        adj_ok: impl Fn(usize) -> bool,
+        noun_ok: impl Fn(usize) -> bool,
+    ) -> Vec<Suggestion> {
         let mut suggestions = Vec::new();
 
         for lex in lexical_sentences(tokens) {
             for a in 0..lex.len() {
                 let adj_token = lex[a].1;
+
+                // Le candidat doit être employé comme adjectif ici (filtre POS) :
+                // écarte le participe présent verbal (« champs bruissant sous… »,
+                // tagué VERB) tout en gardant l'adjectif verbal (« voyages
+                // fatigants », tagué ADJ). Cf. `adj_ok`.
+                if !adj_ok(lex[a].0) {
+                    continue;
+                }
 
                 // L'adjectif ne doit pas être un homographe verbal conjugué.
                 if is_finite_verb(adj_token) {
@@ -162,13 +184,17 @@ impl EpithetAdjectiveAgreement {
 
 impl Rule for EpithetAdjectiveAgreement {
     fn check(&self, tokens: &[Token]) -> Vec<Suggestion> {
-        self.run(tokens, |_| true)
+        // Sans tags, le lexique seul ne distingue pas participe présent et
+        // adjectif verbal : on accepte tout candidat (« meilleur effort »).
+        self.run(tokens, |_| true, |_| true)
     }
 
     fn check_tagged(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
-        self.run(tokens, |idx| {
-            matches!(tags[idx].upos, Upos::Noun | Upos::Propn)
-        })
+        self.run(
+            tokens,
+            |idx| tags[idx].upos == Upos::Adj,
+            |idx| matches!(tags[idx].upos, Upos::Noun | Upos::Propn),
+        )
     }
 
     fn name(&self) -> &'static str {
@@ -195,6 +221,24 @@ mod tests {
 
     fn count(text: &str) -> usize {
         EpithetAdjectiveAgreement.check(&tokenize(text)).len()
+    }
+
+    /// Comptage via le chemin POS (`check_tagged`), tel qu'utilisé en production.
+    fn count_tagged(text: &str) -> usize {
+        let tokens = tokenize(text);
+        let tags = crate::pos::tag(&tokens);
+        EpithetAdjectiveAgreement.check_tagged(&tokens, &tags).len()
+    }
+
+    /// Première suggestion via le chemin POS (`check_tagged`).
+    fn first_tagged(text: &str) -> Option<String> {
+        let tokens = tokenize(text);
+        let tags = crate::pos::tag(&tokens);
+        EpithetAdjectiveAgreement
+            .check_tagged(&tokens, &tags)
+            .into_iter()
+            .next()
+            .and_then(|s| s.replacements.into_iter().next())
     }
 
     #[test]
@@ -235,6 +279,27 @@ mod tests {
         assert_eq!(count("une grande maison"), 0);
         // En revanche le nombre est corrigé : « les grande maisons » → « grandes ».
         assert_eq!(first("les grande maisons").as_deref(), Some("grandes"));
+    }
+
+    #[test]
+    fn present_participle_is_invariable_via_pos() {
+        // La distinction participe présent (invariable) / adjectif verbal
+        // (accordable) est **syntaxique**, pas lexicale : « bruissant » a la même
+        // graphie dans les deux emplois. Seul le tag du CRF la tranche — c'est
+        // pourquoi le gate est POS et non une heuristique de surface.
+        // Participe présent (tagué VERB), invariable :
+        assert_eq!(count_tagged("Les forêts bruissant sous la brise"), 0);
+        assert_eq!(count_tagged("les champs bruissant sous la brise"), 0);
+        assert_eq!(count_tagged("des enfants jouant dans le jardin"), 0);
+        // Même graphie en emploi adjectival (tagué ADJ) : déjà accordé, silencieux.
+        assert_eq!(count_tagged("Les forêts sont bruissantes sous la brise"), 0);
+        // Participe présent « fatiguant » (avec u) gouvernant un objet : invariable.
+        assert_eq!(
+            count_tagged("les filles fatiguant leur père sont fatigantes"),
+            0
+        );
+        // Adjectif verbal mal accordé (tagué ADJ) : toujours corrigé.
+        assert_eq!(first_tagged("les voyages fatigant").as_deref(), Some("fatigants"));
     }
 
     #[test]

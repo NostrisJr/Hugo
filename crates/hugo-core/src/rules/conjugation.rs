@@ -20,11 +20,21 @@
 //!   ni d'une **préposition** (groupe prépositionnel) ;
 //! - la correction est engendrée par [`morpho::conjugate`], au même mode/temps
 //!   que le verbe fautif (indicatif présent par défaut).
+//!
+//! Quand les étiquettes POS du CRF sont disponibles ([`Rule::check_tagged`]),
+//! des gardes plus fines remplacent les heuristiques morphologiques (le chemin
+//! [`Rule::check`] reste le repli) : le **verbe candidat** doit être étiqueté
+//! `VERB`/`AUX` (un nom homographe — « des points/barres » — n'est plus pris
+//! pour un verbe) ; un groupe nominal précédé d'un token `VERB`/`AUX` est un
+//! complément (y compris derrière un **infinitif**, que `is_finite_verb` ne
+//! voit pas) ; « des »/« du » après un nom est un complément en *de + article*,
+//! pas un sujet ; un pronom après le relatif « qui » est un objet.
 
 use std::collections::HashSet;
 
 use super::{lexical_sentences, Rule};
 use crate::morpho::{self, MorphCategory, MoodTense, Number, Person};
+use crate::pos::{Tagged, Upos};
 use crate::tokenizer::Token;
 use crate::Suggestion;
 
@@ -191,7 +201,16 @@ fn match_case(original: &str, replacement: &str) -> String {
 }
 
 /// Tente d'identifier un sujet débutant à l'index `i` dans une phrase lexicale.
-fn detect_subject(sentence: &[(usize, &Token)], i: usize) -> Option<Subject> {
+///
+/// `tags` (le cas échéant) porte les étiquettes POS du CRF, **alignées sur les
+/// tokens d'origine** (indexées par `sentence[..].0`). Quand elles sont
+/// fournies, des gardes plus fines remplacent les heuristiques morphologiques :
+/// objet de relatif, COD d'infinitif, complément en de+les.
+fn detect_subject(
+    sentence: &[(usize, &Token)],
+    i: usize,
+    tags: Option<&[Tagged]>,
+) -> Option<Subject> {
     let text = &sentence[i].1.text;
 
     // --- Sujet pronominal. ---
@@ -201,6 +220,12 @@ fn detect_subject(sentence: &[(usize, &Token)], i: usize) -> Option<Subject> {
         if i > 0 {
             let prev = &sentence[i - 1].1.text;
             if subject_pronoun(prev).is_some() || is_clitic(prev) {
+                return None;
+            }
+            // Relatif sujet « qui » : le pronom qui suit est un objet, pas le
+            // sujet (« le problème qui nous a été posé » → « nous » n'est pas le
+            // sujet ; le verbe s'accorde avec l'antécédent). On s'abstient.
+            if tags.is_some() && normalize(prev) == "qui" {
                 return None;
             }
         }
@@ -218,15 +243,36 @@ fn detect_subject(sentence: &[(usize, &Token)], i: usize) -> Option<Subject> {
 
     // Gardes contextuelles sur le jeton précédent.
     if i > 0 {
-        let prev = &sentence[i - 1].1.text;
+        let (prev_idx, prev_tok) = sentence[i - 1];
+        let prev = &prev_tok.text;
         // Groupe prépositionnel (« dans les bois chante… ») : pas un sujet.
         if is_preposition(prev) {
             return None;
         }
-        // Complément d'objet après un verbe (« je vois les chats ») : le groupe
-        // nominal n'est pas sujet.
-        if is_finite_verb(prev) {
-            return None;
+        match tags {
+            Some(tags) => {
+                // Complément d'objet après un verbe, **y compris un infinitif**
+                // (« redéployer des postes ») que `is_finite_verb` ne détecte
+                // pas : c'est l'étiquette POS qui tranche.
+                if matches!(tags[prev_idx].upos, Upos::Verb | Upos::Aux) {
+                    return None;
+                }
+                // « des »/« du » = « de » + article : précédés d'un nom, ils
+                // introduisent un complément (« la démultiplication des usages »),
+                // pas un nouveau sujet.
+                if matches!(normalize(text).as_str(), "des" | "du")
+                    && tags[prev_idx].upos == Upos::Noun
+                {
+                    return None;
+                }
+            }
+            None => {
+                // Complément d'objet après un verbe conjugué (« je vois les
+                // chats ») : le groupe nominal n'est pas sujet.
+                if is_finite_verb(prev) {
+                    return None;
+                }
+            }
         }
         // Deux déterminants de suite : configuration douteuse.
         if determiner_number(prev).is_some() {
@@ -244,6 +290,17 @@ fn detect_subject(sentence: &[(usize, &Token)], i: usize) -> Option<Subject> {
         verb_start: head + 1,
         skip_adjectives: true,
     })
+}
+
+/// Vrai si le verbe candidat à l'index `k` est compatible avec les tags POS :
+/// sans tags, on accepte (chemin morphologique) ; avec tags, on exige que le
+/// jeton soit étiqueté `VERB`/`AUX`, ce qui écarte les **noms homographes**
+/// (« des points/barres » : `barres` est étiqueté `NOUN`).
+fn verb_candidate_ok(sentence: &[(usize, &Token)], k: usize, tags: Option<&[Tagged]>) -> bool {
+    match tags {
+        None => true,
+        Some(tags) => matches!(tags[sentence[k].0].upos, Upos::Verb | Upos::Aux),
+    }
 }
 
 /// Personne (1/2/3) d'un pronom susceptible de figurer dans un sujet coordonné,
@@ -402,7 +459,11 @@ fn agree_at(
 }
 
 impl SubjectVerbAgreement {
-    fn check_sentence(sentence: &[(usize, &Token)], out: &mut Vec<Suggestion>) {
+    fn check_sentence(
+        sentence: &[(usize, &Token)],
+        tags: Option<&[Tagged]>,
+        out: &mut Vec<Suggestion>,
+    ) {
         let mut local = Vec::new();
         // Verbes déjà pris en charge par un sujet coordonné : la détection
         // simple doit les ignorer, sans quoi un membre singulier (« le chien »
@@ -415,6 +476,9 @@ impl SubjectVerbAgreement {
         for i in 0..sentence.len() {
             if let Some((person, verb_start, label)) = detect_coordinated(sentence, i) {
                 if let Some(k) = find_verb(sentence, verb_start, true) {
+                    if !verb_candidate_ok(sentence, k, tags) {
+                        continue;
+                    }
                     claimed.insert(k);
                     if let Some(s) = agree_at(sentence, k, person, Number::Plural, &label) {
                         local.push(s);
@@ -425,9 +489,12 @@ impl SubjectVerbAgreement {
 
         // Sujets simples (pronom ou groupe nominal).
         for i in 0..sentence.len() {
-            if let Some(subject) = detect_subject(sentence, i) {
+            if let Some(subject) = detect_subject(sentence, i, tags) {
                 if let Some(k) = find_verb(sentence, subject.verb_start, subject.skip_adjectives) {
                     if claimed.contains(&k) {
+                        continue;
+                    }
+                    if !verb_candidate_ok(sentence, k, tags) {
                         continue;
                     }
                     if let Some(s) =
@@ -453,7 +520,15 @@ impl Rule for SubjectVerbAgreement {
     fn check(&self, tokens: &[Token]) -> Vec<Suggestion> {
         let mut suggestions = Vec::new();
         for sentence in lexical_sentences(tokens) {
-            Self::check_sentence(&sentence, &mut suggestions);
+            Self::check_sentence(&sentence, None, &mut suggestions);
+        }
+        suggestions
+    }
+
+    fn check_tagged(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
+        let mut suggestions = Vec::new();
+        for sentence in lexical_sentences(tokens) {
+            Self::check_sentence(&sentence, Some(tags), &mut suggestions);
         }
         suggestions
     }
@@ -644,5 +719,67 @@ mod tests {
         // « principales » (nom/adjectif) ne doit pas être pris pour le nom tête :
         // le sujet est « mesures », « concernent » est déjà accordé.
         assert_eq!(count("les principales mesures concernent le pays"), 0);
+    }
+
+    // --- Chemin POS (`check_tagged`). ---
+
+    fn tagged_first(text: &str) -> Option<String> {
+        let tokens = tokenize(text);
+        let tags = crate::pos::tag(&tokens);
+        SubjectVerbAgreement
+            .check_tagged(&tokens, &tags)
+            .into_iter()
+            .next()
+            .and_then(|s| s.replacements.into_iter().next())
+    }
+
+    fn tagged_count(text: &str) -> usize {
+        let tokens = tokenize(text);
+        let tags = crate::pos::tag(&tokens);
+        SubjectVerbAgreement.check_tagged(&tokens, &tags).len()
+    }
+
+    #[test]
+    fn pos_path_still_corrects_real_mismatches() {
+        // Les vrais désaccords restent corrigés une fois le POS consommé.
+        assert_eq!(tagged_first("ils mange").as_deref(), Some("mangent"));
+        assert_eq!(tagged_first("les chats mange").as_deref(), Some("mangent"));
+        assert_eq!(
+            tagged_first("Pierre et Marie mange").as_deref(),
+            Some("mangent")
+        );
+    }
+
+    #[test]
+    fn pos_path_noun_homograph_is_not_a_verb() {
+        // « barres » est étiqueté NOUN : « des points/barres verticales » ne doit
+        // plus déclencher un faux accord sujet–verbe.
+        assert_eq!(tagged_count("des points barres verticales de couleur"), 0);
+    }
+
+    #[test]
+    fn pos_path_object_of_infinitive_is_not_subject() {
+        // « des postes » est COD de l'infinitif « redéployer » : pas un sujet,
+        // donc pas d'accord forcé sur « compromis ».
+        assert_eq!(
+            tagged_count("la nécessité grandissante de pouvoir redéployer des postes compromis"),
+            0
+        );
+    }
+
+    #[test]
+    fn pos_path_de_les_complement_is_not_subject() {
+        // « des usages » (= de+les), complément de « démultiplication », ne doit
+        // pas être pris pour le sujet de « alla ».
+        assert_eq!(
+            tagged_count("la démultiplication des usages digitaux alla de pair avec les risques"),
+            0
+        );
+    }
+
+    #[test]
+    fn pos_path_relative_object_pronoun_is_not_subject() {
+        // « nous », objet du relatif « qui », n'est pas le sujet de « a ».
+        assert_eq!(tagged_count("le problème qui nous a été posé"), 0);
     }
 }

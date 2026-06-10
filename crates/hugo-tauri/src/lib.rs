@@ -43,9 +43,16 @@ pub struct JsSuggestion {
 }
 
 /// Commande Tauri : vérifie `text` et renvoie les suggestions.
+///
+/// `async` afin que Tauri l'exécute sur le pool de threads de l'async runtime
+/// et non sur le thread principal : le calcul (potentiellement coûteux sur un
+/// gros texte) ne bloque pas l'UI de l'application hôte.
 #[tauri::command]
-fn check_text(text: String, state: tauri::State<'_, Checker>) -> Vec<JsSuggestion> {
-    state
+async fn check_text(
+    text: String,
+    state: tauri::State<'_, Checker>,
+) -> Result<Vec<JsSuggestion>, ()> {
+    Ok(state
         .check(&text)
         .into_iter()
         .map(|s| JsSuggestion {
@@ -55,7 +62,7 @@ fn check_text(text: String, state: tauri::State<'_, Checker>) -> Vec<JsSuggestio
             replacements: s.replacements,
             rule_id: s.rule_id.to_string(),
         })
-        .collect()
+        .collect())
 }
 
 /// Initialise le plugin Hugo.

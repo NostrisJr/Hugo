@@ -365,8 +365,17 @@ mod tests {
 
     #[test]
     fn unknown_gender_noun_is_not_flagged() {
-        // « maison » a un genre vide dans Lexique : pas de fausse alerte.
-        assert!(replacements("un maison").is_empty());
+        // Un nom **épicène** (« camarade » : un/une) reste sans genre dans le
+        // lexique : aucune fausse alerte d'accord en genre.
+        assert!(replacements("un camarade").is_empty());
+    }
+
+    #[test]
+    fn gender_override_enables_agreement_check() {
+        // « maison » a un genre vide dans Lexique383, comblé par l'override curé
+        // (cf. tools/compile-morpho/gender-overrides.tsv) : l'accord en genre
+        // s'applique désormais (« un maison » → « une »).
+        assert_eq!(first_replacement("un maison").as_deref(), Some("une"));
     }
 
     // --- Déterminants composés / contractés. ---

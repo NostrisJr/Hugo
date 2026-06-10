@@ -145,7 +145,9 @@ Livrer une bibliothèque Rust autonome capable de :
   - [x] Intégration dans le pipeline entre morpho lookup et moteur de règles
     (`pos::tag` dans `Checker::check`, exposé aux règles via `Rule::check_tagged`)
   - [x] Précision POS : **97,8 % (dev) / 97,6 % (test)** — cible >97 % atteinte
-  - [ ] *Suivi* : réécriture des règles pour consommer la catégorie unique
+  - [x] *Suivi* : réécriture des règles pour consommer la catégorie unique —
+    fait pour `agreement`/`epithet`, puis `conjugation` et `attribute`
+    (cf. « Robustesse de l'identification du sujet », phase 6)
 
 #### Plan d'implémentation du CRF
 
@@ -238,10 +240,8 @@ séparable) et la concordance des temps.
   - [x] *tout* : "toute les jours" → "tous les jours" (`rules::quantifier`)
   - [ ] Adjectifs de couleur **composés** : "des robes bleu ciel" (deux mots)
   - [ ] Trait d'union dans les nombres composés (post-réforme 1990)
-- [ ] **Port des règles LanguageTool**
-  - [ ] Inventaire des règles françaises XML de LanguageTool
-  - [ ] Réécriture en Rust des règles les plus impactantes
-  - [ ] Benchmark qualité vs LanguageTool en mode local
+- [ ] **Moteur de règles déclaratif** → déplacé en **phase 6** (capitalisation sur
+  Grammalecte/LT sans porter leur code ni leurs données).
 
 ---
 
@@ -261,6 +261,147 @@ séparable) et la concordance des temps.
 
 ---
 
+### Phase 6 — Moteur de règles déclaratif & capitalisation sur Grammalecte/LT (mois 4+)
+
+**Objectif** : faire croître la couverture grammaticale (« se conformer le plus
+possible au français ») en réutilisant le *savoir* accumulé par Grammalecte et
+LanguageTool, sans hériter de leurs contraintes.
+
+**Décision stratégique.** Cible inchangée : correcteur **pur-Rust, embarquable,
+rapide** (pas de serveur). Grammalecte (GPL v3, Python, lent) et LanguageTool
+(LGPL 2.1, JVM) **ne sont pas portables tels quels** : leurs ~1 500 / ~700+
+règles sont **couplées à leur moteur** (Python embarqué — `morph/select/define`
+qui mutent la morpho — pour Grammalecte ; XML + classes Java pour LT). On ne porte
+donc **ni leur code ni leurs données** (listes curées et phrases de test = œuvres
+sous copyleft). On réutilise leur **savoir** — la *cartographie* des phénomènes du
+français et de leurs exceptions, qui relève des faits, non protégeables — en le
+réimplémentant dans **notre** moteur, avec **nos** listes et **notre** corpus.
+
+**Principe anti-fragilité (emprunté à Grammalecte).** La morphologie + le CRF font
+le tri ; les exceptions sont des **données explicites** ; **aucune règle sans son
+corpus de test** (leurs 14 160 `TEST:` sont leur vrai trésor — on adopte le
+format, pas le contenu).
+
+**Moteur cible** (`crates/hugo-core/src/rules/confusion.rs` ou un module `engine`) :
+- Une règle = **motif de tokens** (littéral / catégorie POS / condition morpho)
+  + **antipatterns** (listes d'exceptions) + **cible & suggestion** (littéral ou
+  forme engendrée par `morpho::decline/conjugate/participle`).
+- S'exécute sur les tokens **et** les tags CRF déjà disponibles ; matcheurs
+  compilés (rapide, embarquable). Bien plus efficace que Python + regex sur texte.
+- Règles + corpus stockés en données versionnées (`corpus/*.md`).
+
+**Tranches verticales** (par famille, chacune livrée avec son corpus reconstitué) :
+- [x] **Tranche 1 — a/à** (`rules::confusion`, consomme le POS) : règle générale
+  `NOM + a + NOM → à` + liste d'idiomes *avoir* ([`AVOIR_IDIOMS`], reconstituée) ;
+  `a + infinitif → à` ; `verbe + a → à` (veto POS sur l'homographe « y » de
+  « il y a ») ; locutions figées. Direction à→a en remontant au-delà des
+  clitiques objets (`y / l' / les / nous / ne …`) : pronom sujet fort
+  (`il/elle/on → a`, `ils/elles → ont`), sujet nominal/relatif `qui` gardé par un
+  participe passé suivant. Remplace le veto fragile de `rules::homophones`.
+  L'homographe nom/verbe mal étiqueté par le CRF (« moulin a poivre ») est
+  rattrapé en consultant les **lectures possibles** du lexique (nom sans participe
+  passé), à la Grammalecte, plutôt que l'unique tag forcé.
+  Corpus : [`corpus/confusion-a-a.md`](corpus/confusion-a-a.md) — **19/20** cas
+  fautifs captés, **0 faux positif**. Seul gap restant : `a + déterminant + nom`
+  (« tarte a la rhubarbe »), ambiguïté **structurelle** — « avoir + det + nom »
+  est productif et correct (« il a la grippe », « le gâteau a la forme d'un
+  cœur ») ; aucune liste d'exceptions ne sépare les deux (même nom des deux
+  côtés). Résoluble seulement par une heuristique **syntaxique** (la proposition a
+  déjà son verbe → le nom est un COD, pas un sujet), à tenter ultérieurement.
+- [x] **Tranche 2 — ce/se, c'est/s'est** (`rules::confusion::ce_se`, consomme le
+  POS) : **ce→se** (sujet pronom + ce + verbe conjugué, « ne » sauté) ; **se→ce**
+  (se devant un nom/adjectif tagué, ou un relatif que/qui/dont) — reprend et
+  enrichit le traitement historiquement porté par `rules::homophones`, désormais
+  retiré de cette dernière (comme la tranche 1 pour a/à) ; **c'→s'** (sujet de 3ᵉ
+  personne `il/elle/on`/`qui`/nom, sans virgule, + « c'est »/« c'était » + participe
+  passé → « s' est ») ; **s'→c'** (« s'est » non suivi d'un participe → « c'est »,
+  adverbes sautés). Corpus :
+  [`corpus/confusion-ce-se.md`](corpus/confusion-ce-se.md). Gaps assumés :
+  **ces/ses** (deux déterminants également valides — ambiguïté structurelle, comme
+  a+det+nom) ; **sais/sait** (déjà traités par l'accord sujet–verbe) ; homographes
+  nom/verbe mal tagués après « se » (« se livre ») et participes hors lexique.
+- [x] **Tranche 3 — ou/où, la/là/l'a, leur/leurs, peu/peut/peux** (une famille par
+  module dans `rules::confusion`, chacune consommant le POS et livrée avec son
+  corpus reconstitué) :
+  - **ou/où** (`ou_ou::OuConfusion`, [`corpus/confusion-ou-ou.md`](corpus/confusion-ou-ou.md)) :
+    seule direction **ou→où** a un signal séparable — antécédent de lieu/temps
+    (liste fermée, ou `là`/`ici`/`partout`) + « ou » + **pronom sujet** →
+    relative → « où » (« le jour ou je suis né » → « où »). **où→ou** reste un
+    gap **structurel** (« où » relatif suit indifféremment un déterminant ou un
+    sujet, comme l'alternative).
+  - **la/là/l'a** (`la_la::LaConfusion`, [`corpus/confusion-la-la.md`](corpus/confusion-la-la.md)) :
+    **là→la** devant un nom non explicitement masculin (« là maison » → « la ») ;
+    **la→l'a** sujet 3ᵉ pers. + « la » + participe passé (« il la mangé » →
+    « l'a »). Gaps : la→là adverbial (homographie pronom objet), là→la masculin
+    (« le », article manquant).
+  - **leur/leurs** (`leur_leurs::LeurConfusion`, [`corpus/confusion-leur-leurs.md`](corpus/confusion-leur-leurs.md)) :
+    accord du possessif (« leur livres » → « leurs », « leurs maison » → « leur »)
+    et pronom invariable devant un verbe (« je leurs parle » → « leur »). Gap :
+    noms non marqués/invariables en nombre au lexique.
+  - **peu/peut/peux** (`peu_peut::PeuConfusion`, [`corpus/confusion-peu-peut.md`](corpus/confusion-peu-peut.md)) :
+    **peu→peut/peux** (sujet + « peu » + infinitif, forme selon la personne) ;
+    **peut/peux→peu** (quantifieur précédent, ou *avoir* + … + « de »). La
+    confusion de **personne** peux↔peut est laissée à l'accord sujet–verbe.
+- [ ] Tranche 4 — quel(s)/quelle(s)/qu'elle(s), quand/quant/qu'en, sans/s'en/c'en
+- [ ] Tranche 5 — terminaisons homophones (-er/-é/-ez, -ai/-ais/-ait)
+- [x] **Robustesse de l'identification du sujet (consommation du POS)** —
+  *chantier prioritaire* regroupant une famille de **faux positifs** où un
+  complément voisin est pris pour le sujet (ou un nom homographe pour un verbe).
+  Racine commune : `conjugation` et `attribute` raisonnent encore sur la
+  morphologie brute (`Rule::check`, **sans** les tags CRF) et leur recherche du
+  sujet est purement locale. Cas recensés (cf. [`PROBLEMES.md`](PROBLEMES.md),
+  reproduits via `examples/check`) :
+  - **nom homographe lu comme verbe** : « des points/barres verticales » →
+    `barres` (étiqueté `NOUN` par le CRF) déclenché comme verbe. Correctif : le
+    verbe candidat doit être étiqueté `VERB`/`AUX`.
+  - **COD d'un infinitif pris pour sujet** : « …redéployer des postes
+    compromis » → « des postes » (objet de l'infinitif `redéployer`) pris pour
+    sujet, puis `compromis` accordé. La garde `is_finite_verb(prev)` ignore les
+    infinitifs ; correctif : refuser un GN sujet précédé d'un token `VERB`/`AUX`.
+    (À noter : `compromis` est ici **mal** étiqueté `VERB` par le CRF — la garde
+    côté verbe ne suffit pas, d'où l'importance de la garde côté sujet.)
+  - **complément en de+les / de+le** : « la démultiplication des usages digitaux
+    alla… » → « des usages » (complément partitif de « démultiplication ») pris
+    pour sujet. Correctif : « des »/« du » précédés d'un **nom** = complément,
+    pas un nouveau sujet.
+  - **objet de relative** : « le problème qui nous a été posé » → « nous »
+    (clitique objet) pris pour sujet. Correctif : un pronom précédé d'un relatif
+    `qui/que/dont/où` est objet ; le sujet est l'antécédent (« problème »).
+  - **objet de groupe prépositionnel (attribut)** : « L'outil … dans une
+    nouvelle ère fut nommé » → « ère » (objet de « dans ») pris pour sujet de
+    `nommé`. Correctif : en remontant vers le sujet, refuser un nom introduit par
+    une préposition (objet de PP) ; à défaut de sujet sûr dans la fenêtre, ne
+    rien émettre (**précision > rappel**).
+  - **proposition participiale** (bug historique) : « les filles fatiguant leur
+    père sont fatigantes » → « père » pris pour sujet. **Réglé** par la même
+    garde (`attribute::is_governed_left`) : un nom gouverné à gauche par un verbe
+    — typiquement un participe présent — n'est pas le sujet de la copule.
+
+  **Fait** : `conjugation` et `attribute` portés sur `check_tagged` (`check`
+  conservé en repli), avec gardes POS dédiées (`verb_candidate_ok`,
+  `detect_subject(.., tags)` côté sujet–verbe ; `find_subject` +
+  `is_governed_left` côté attribut) et **corpus de non-régression** dans
+  `tests/grammar.rs`. Les 6 symptômes ci-dessus sont neutralisés. A débloqué
+  l'item « Suivi » de la phase 4.
+- [ ] **Capitalisation : « … » non terminal** — « (perte, vol, virus…) perdu »
+  réclame à tort une majuscule sur « perdu » : les points de suspension dans une
+  parenthèse (et, plus largement, suivis d'une minuscule) ne ferment pas la
+  phrase. Correctif côté tokenizer/`capitalization` (suivi de la profondeur de
+  parenthèses + heuristique de continuation). *Item adjacent, hors du chantier
+  « identification du sujet ».*
+- [ ] **sur / sûr** — « sur le côté » → suggestion erronée « sûre » (la
+  préposition « sur », aussi adjectif « sur » = acide au lexique, traitée comme
+  attribut à accorder). Non reproduit isolément ; à rejouer sur le paragraphe
+  complet, vraisemblablement réglé par la même garde POS (n'accorder qu'un
+  attribut étiqueté `ADJ`). *Item adjacent.*
+
+**Sources d'inspiration du corpus** (toujours reformulées, jamais copiées) :
+Projet Voltaire, Question Orthographe, Banque de dépannage linguistique,
+listes de difficultés du français. Les cas de Grammalecte/LT servent de
+**checklist de phénomènes** uniquement.
+
+---
+
 ## Données et licences
 
 | Ressource | Licence | Usage |
@@ -268,7 +409,8 @@ séparable) et la concordance des temps.
 | Lefff | LGPL-LR | Morphologie — libre commercial |
 | Dicollecte fr_FR | MPL 2.0 | Orthographe — libre commercial |
 | UD French-GSD | CC BY-SA 4.0 | Entraînement CRF (phase 4) |
-| LanguageTool rules/fr | LGPL 2.1 | Inspiration — réécriture intégrale en Rust |
+| Grammalecte (gc_lang/fr) | GPL v3 | **Inspiration seule** — checklist de phénomènes ; aucun code, liste ni test copié (cf. phase 6) |
+| LanguageTool rules/fr | LGPL 2.1 | **Inspiration seule** — idem ; savoir réutilisé, données reconstituées |
 | Crate `fst` | MIT / Unlicense | FST et DAWG |
 | Crate `wasm-bindgen` | MIT / Apache-2.0 | Bindings WASM |
 | Tauri v2 | MIT / Apache-2.0 | Plugin natif |
@@ -280,3 +422,13 @@ séparable) et la concordance des temps.
 - Le nom `hugo` sur crates.io est à vérifier (peut-être pris par le générateur de sites statique Hugo en Go — dans ce cas, `hugo-fr` ou `hugo-spell`).
 - Licence du projet : MIT / Apache-2.0 dual (standard Rust).
 - Le CRF (phase 4) est la pièce la plus complexe. Les phases 1–3 fonctionnent avec la morphologie lexicale seule + heuristiques de contexte.
+- **Complétion du genre** : Lexique383 laisse ~5 % des noms sans genre. La grande
+  majorité est légitime (épicènes « un/une camarade » ; bi-genres « le/la tour,
+  livre, poste »…), mais quelques dizaines sont de **vrais trous** mono-genre
+  (« maison », « voiture », « main », « cours »…). Ils sont comblés par une liste
+  curée **originale** ([`tools/compile-morpho/gender-overrides.tsv`](tools/compile-morpho/gender-overrides.tsv)),
+  honorée par `compile-morpho` à la recompilation et appliquée à l'asset déjà
+  compilé par [`tools/patch-morpho-gender`](tools/patch-morpho-gender) (la source
+  Lexique383 n'étant pas vendue dans le dépôt). On n'écrase jamais un genre connu
+  et on n'invente jamais celui des épicènes/bi-genres. Débloque l'accord en genre
+  sur ces noms (« un maison » → « une maison »).

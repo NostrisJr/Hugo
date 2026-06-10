@@ -1,0 +1,49 @@
+# Override de genre — noms mono-genre laissés SANS genre par Lexique383.
+#
+# Données **originales** de ce projet (savoir lexical usuel, aucune copie d'un
+# corpus tiers). Format : `lemme<TAB>genre` (genre = m | f). Commentaires « # ».
+#
+# CONSTAT (mesuré sur l'asset) : ~5 % des noms n'ont pas de genre dans Lexique383,
+# mais la grande majorité est **légitimement** sans genre fixe — épicènes
+# (« un/une camarade, élève, journaliste »…) ou **bi-genres** (« le/la tour,
+# livre, poste, mode, manche, voile, mémoire, somme, mort, aide, page »…). Les
+# **vrais trous** mono-genre se comptent en dizaines, pas en centaines : ce sont
+# eux, et eux seuls, que ce fichier comble.
+#
+# RÈGLE D'INCLUSION STRICTE : uniquement des noms **certainement mono-genre** ;
+# aucun épicène, aucun bi-genre. Appliqué (par `patch-morpho-gender` et par
+# `compile-morpho`) UNIQUEMENT aux analyses nominales dont le genre est absent —
+# un genre déjà connu n'est jamais écrasé. Chaque entrée ci-dessous comble
+# effectivement un trou de l'asset courant.
+
+# --- Féminin ---
+maison	f
+voiture	f
+main	f
+fin	f
+part	f
+chance	f
+gorge	f
+rue	f
+ombre	f
+poche	f
+barbe	f
+ordonnance	f
+claque	f
+finale	f
+romance	f
+clope	f
+pub	f
+radio	f
+
+# --- Masculin ---
+cours	m
+geste	m
+litre	m
+micro	m
+hymne	m
+mannequin	m
+jockey	m
+baume	m
+automate	m
+suspense	m

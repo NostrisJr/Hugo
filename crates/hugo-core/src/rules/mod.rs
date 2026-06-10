@@ -16,6 +16,7 @@
 pub mod agreement;
 pub mod attribute;
 pub mod capitalization;
+pub mod confusion;
 pub mod conjugation;
 pub mod duplicates;
 pub mod epithet;
@@ -72,6 +73,12 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(special_agreement::SpecialAgreement),
         Box::new(past_participle::PastParticipleAvoir),
         Box::new(subjunctive::SubjunctiveAfterConjunction),
+        Box::new(confusion::AAConfusion),
+        Box::new(confusion::CeSeConfusion),
+        Box::new(confusion::OuConfusion),
+        Box::new(confusion::LaConfusion),
+        Box::new(confusion::LeurConfusion),
+        Box::new(confusion::PeuConfusion),
         Box::new(homophones::HomophoneRule),
     ]
 }

@@ -14,9 +14,18 @@
 //!   dépendant du locuteur) ;
 //! - l'**attribut** doit être analysé comme adjectif ; la forme corrigée est
 //!   engendrée par [`morpho::decline`]. Si elle est introuvable, on n'émet rien.
+//!
+//! Avec les étiquettes POS du CRF ([`Rule::check_tagged`] ; [`Rule::check`]
+//! reste le repli), la remontée vers le sujet ([`find_subject`]) **refuse** un
+//! nom gouverné à gauche par une préposition ou un verbe
+//! ([`is_governed_left`]) : objet d'un groupe prépositionnel (« …dans une
+//! nouvelle ère »), ou objet d'un **participe présent** ouvrant une proposition
+//! participiale (« les filles fatiguant leur père »). Faute de sujet sûr dans
+//! la fenêtre, on s'abstient (précision > rappel).
 
 use super::{lexical_sentences, Rule};
-use crate::morpho::{self, Gender, Morph, MorphCategory, Number};
+use crate::morpho::{self, Gender, Morph, MorphCategory, Number, Person};
+use crate::pos::{Tagged, Upos};
 use crate::tokenizer::Token;
 use crate::Suggestion;
 
@@ -171,12 +180,19 @@ fn unique_lemma<'a>(analyses: &[&'a Morph]) -> Option<&'a str> {
     it.all(|l| l == first).then_some(first)
 }
 
-/// Lemme de la copule présente sur ce jeton, le cas échéant.
-fn copula_lemma(token: &Token) -> Option<String> {
+/// Vrai si le jeton porte une copule conjuguée **à la 3ᵉ personne**.
+///
+/// Tous les sujets que cette règle accepte (noms à genre connu, pronoms
+/// `il/elle/ils/elles`) sont à la 3ᵉ personne. Une forme attributive
+/// exclusivement 1ʳᵉ/2ᵉ personne — « (je) suis », « (tu) es », « sois » à
+/// l'impératif ou au subjonctif — n'a donc pas de sujet nominal : son sujet est
+/// le locuteur ou l'interlocuteur, au genre indéterminé. On s'abstient alors,
+/// ce qui évite de prendre un nom précédent pour le sujet (« La flamme de nos
+/// lanternes, sois exaucé ! » ne déclenche plus « exaucées »).
+fn is_third_person_copula(token: &Token) -> bool {
     morpho::verb_forms(&token.text)
-        .into_iter()
-        .map(|v| v.lemma)
-        .find(|l| COPULAS.contains(&l.as_str()))
+        .iter()
+        .any(|v| COPULAS.contains(&v.lemma.as_str()) && v.person == Person::Third)
 }
 
 /// Calque la casse initiale de `original` sur `replacement`.
@@ -191,15 +207,79 @@ fn match_case(original: &str, replacement: &str) -> String {
     }
 }
 
-impl Rule for AttributeAdjectiveAgreement {
-    fn check(&self, tokens: &[Token]) -> Vec<Suggestion> {
+/// Vrai si le nom à l'index lexical `s` est **gouverné à gauche** par une
+/// préposition ou un verbe — il n'est donc pas le sujet de la copule.
+///
+/// En remontant par-dessus ses prémodifieurs (déterminants, adjectifs), on
+/// atteint :
+/// - une **préposition** (`ADP`) → objet d'un groupe prépositionnel
+///   (« …dans une nouvelle ère ») ;
+/// - un **verbe** (`VERB`/`AUX`), typiquement un **participe présent** ouvrant
+///   une proposition participiale (« les filles *fatiguant* leur père sont… »
+///   → « père » est l'objet de « fatiguant », pas le sujet de « sont »).
+///
+/// Dans les deux cas le nom appartient à une autre tête syntaxique : on le
+/// refuse comme sujet.
+fn is_governed_left(lex: &[(usize, &Token)], s: usize, tags: &[Tagged]) -> bool {
+    let mut j = s;
+    while j > 0 {
+        j -= 1;
+        match tags[lex[j].0].upos {
+            Upos::Det | Upos::Adj => continue,
+            Upos::Adp | Upos::Verb | Upos::Aux => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Cherche le sujet en reculant depuis la copule à l'index lexical `k`, en
+/// sautant clitiques et adjectifs antéposés. Avec les tags POS, **refuse** un
+/// nom objet d'une préposition (cf. [`is_prepositional_object`]) et continue à
+/// remonter ; faute de sujet sûr dans la fenêtre, renvoie `None` (on s'abstient
+/// plutôt que d'accorder sur un faux sujet — précision > rappel).
+fn find_subject(
+    lex: &[(usize, &Token)],
+    k: usize,
+    tags: Option<&[Tagged]>,
+) -> Option<(Gender, Number)> {
+    let mut s = k;
+    let mut steps = 0;
+    loop {
+        if s == 0 || steps > MAX_WINDOW {
+            return None;
+        }
+        s -= 1;
+        steps += 1;
+        let tok = lex[s].1;
+        if let Some(f) = subject_features(tok) {
+            if let Some(tags) = tags {
+                if is_governed_left(lex, s, tags) {
+                    continue;
+                }
+            }
+            return Some(f);
+        }
+        // Sauter clitiques et adjectifs antéposés ; sinon abandonner.
+        let is_adj = morpho::lookup(&tok.text)
+            .iter()
+            .any(|m| m.category == MorphCategory::Adjective);
+        if is_clitic(&tok.text) || is_adj {
+            continue;
+        }
+        return None;
+    }
+}
+
+impl AttributeAdjectiveAgreement {
+    fn scan(tokens: &[Token], tags: Option<&[Tagged]>) -> Vec<Suggestion> {
         let mut suggestions = Vec::new();
 
         for lex in lexical_sentences(tokens) {
             for k in 0..lex.len() {
-                let Some(_lemma) = copula_lemma(lex[k].1) else {
+                if !is_third_person_copula(lex[k].1) {
                     continue;
-                };
+                }
 
                 // Construction pronominale (« elle s'est levé ») : le réfléchi
                 // précède immédiatement l'auxiliaire « être » ; on délègue à
@@ -210,28 +290,7 @@ impl Rule for AttributeAdjectiveAgreement {
                 }
 
                 // --- Sujet : reculer en sautant clitiques et adjectifs. ---
-                let mut s = k;
-                let mut steps = 0;
-                let subject = loop {
-                    if s == 0 || steps > MAX_WINDOW {
-                        break None;
-                    }
-                    s -= 1;
-                    steps += 1;
-                    let tok = lex[s].1;
-                    if let Some(f) = subject_features(tok) {
-                        break Some(f);
-                    }
-                    // Sauter clitiques et adjectifs antéposés ; sinon abandonner.
-                    let is_adj = morpho::lookup(&tok.text)
-                        .iter()
-                        .any(|m| m.category == MorphCategory::Adjective);
-                    if is_clitic(&tok.text) || is_adj {
-                        continue;
-                    }
-                    break None;
-                };
-                let Some((gender, number)) = subject else {
+                let Some((gender, number)) = find_subject(&lex, k, tags) else {
                     continue;
                 };
 
@@ -303,6 +362,16 @@ impl Rule for AttributeAdjectiveAgreement {
         }
 
         suggestions
+    }
+}
+
+impl Rule for AttributeAdjectiveAgreement {
+    fn check(&self, tokens: &[Token]) -> Vec<Suggestion> {
+        Self::scan(tokens, None)
+    }
+
+    fn check_tagged(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
+        Self::scan(tokens, Some(tags))
     }
 
     fn name(&self) -> &'static str {
@@ -415,10 +484,76 @@ mod tests {
     }
 
     #[test]
+    fn imperative_copula_has_no_nominal_subject() {
+        // « sois » (impératif/subjonctif, 1ʳᵉ/2ᵉ pers.) n'a pas de sujet nominal :
+        // le nom qui précède n'est pas le sujet. Le correctif tient sur la phrase
+        // complète comme sur le fragment — c'est la personne de la copule, non la
+        // ponctuation, qui tranche.
+        assert_eq!(
+            count("Quand s'allume la flamme de nos lanternes, sois exaucé."),
+            0
+        );
+        assert_eq!(count("La flamme de nos lanternes, sois exaucé !"), 0);
+        assert_eq!(count("sois exaucé"), 0);
+        assert_eq!(count("sois prêt"), 0);
+    }
+
+    #[test]
     fn avoir_auxiliary_is_not_subject_agreement() {
         // Avec « avoir », le participe ne s'accorde pas avec le sujet.
         // « elle a mangé » ne doit rien déclencher.
         assert_eq!(count("elle a mangé"), 0);
         assert_eq!(count("ils ont mangé"), 0);
+    }
+
+    // --- Chemin POS (`check_tagged`). ---
+
+    fn tagged_first(text: &str) -> Option<String> {
+        let tokens = tokenize(text);
+        let tags = crate::pos::tag(&tokens);
+        AttributeAdjectiveAgreement
+            .check_tagged(&tokens, &tags)
+            .into_iter()
+            .next()
+            .and_then(|s| s.replacements.into_iter().next())
+    }
+
+    fn tagged_count(text: &str) -> usize {
+        let tokens = tokenize(text);
+        let tags = crate::pos::tag(&tokens);
+        AttributeAdjectiveAgreement.check_tagged(&tokens, &tags).len()
+    }
+
+    #[test]
+    fn pos_path_still_corrects_real_mismatches() {
+        assert_eq!(tagged_first("elle est content").as_deref(), Some("contente"));
+        assert_eq!(tagged_first("ils sont content").as_deref(), Some("contents"));
+        assert_eq!(tagged_first("elle est parti").as_deref(), Some("partie"));
+    }
+
+    #[test]
+    fn pos_path_prepositional_object_is_not_subject() {
+        // « ère » est l'objet de « dans » : ce n'est pas le sujet de « nommé »,
+        // donc aucune fausse correction « nommée ». Le vrai sujet (« outil »)
+        // est hors fenêtre : on s'abstient plutôt que d'accorder à tort.
+        assert_eq!(
+            tagged_count("l'outil propulsé dans une nouvelle ère fut nommé Intune"),
+            0
+        );
+        // Cas court : « le chat de la voisine est content » — « voisine »
+        // (objet de « de ») n'est pas le sujet ; « content » s'accorde déjà au
+        // vrai sujet masculin « chat ».
+        assert_eq!(tagged_count("le chat de la voisine est content"), 0);
+    }
+
+    #[test]
+    fn pos_path_present_participle_clause_is_not_subject() {
+        // Bug historique : « père », objet du participe présent « fatiguant »,
+        // n'est pas le sujet de « sont » → pas de fausse correction « fatigant »
+        // (l'accord « fatigantes » avec « filles » est correct).
+        assert_eq!(
+            tagged_count("les filles fatiguant leur père sont fatigantes"),
+            0
+        );
     }
 }

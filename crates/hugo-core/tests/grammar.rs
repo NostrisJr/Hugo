@@ -14,6 +14,12 @@ const GRAMMAR_RULES: &[&str] = &[
     "epithet_adjective_agreement",
     "tout_agreement",
     "homophone",
+    "confusion_a_a",
+    "confusion_ce_se",
+    "confusion_ou",
+    "confusion_la",
+    "confusion_leur",
+    "confusion_peu",
 ];
 
 /// Suggestions grammaticales d'un texte (orthographe/capitalisation exclues).
@@ -55,12 +61,25 @@ const INCORRECT: &[(&str, &str, &str)] = &[
     // Accord de « tout ».
     ("toute les jours", "tout_agreement", "tous"),
     ("tout les semaines", "tout_agreement", "toutes"),
+    // Confusion a/à.
+    ("il va a Paris", "confusion_a_a", "à"),
+    ("il à faim", "confusion_a_a", "a"),
     // Homophones.
-    ("il va a Paris", "homophone", "à"),
-    ("il à faim", "homophone", "a"),
     ("ils on mangé", "homophone", "ont"),
     ("ils son partis", "homophone", "sont"),
-    ("il ce lève", "homophone", "se"),
+    // Confusion ce/se, c'est/s'est.
+    ("il ce lève", "confusion_ce_se", "se"),
+    ("il aime se chien", "confusion_ce_se", "ce"),
+    ("il c'est trompé", "confusion_ce_se", "s'"),
+    ("s'est magnifique", "confusion_ce_se", "c'"),
+    // Confusion ou/où, la/là/l'a, leur/leurs, peu/peut/peux (tranche 3).
+    ("le jour ou je suis né", "confusion_ou", "où"),
+    ("là maison est belle", "confusion_la", "la"),
+    ("il la mangé", "confusion_la", "l'a"),
+    ("leur livres sont neufs", "confusion_leur", "leurs"),
+    ("je leurs parle", "confusion_leur", "leur"),
+    ("il peu marcher", "confusion_peu", "peut"),
+    ("un peut de sel", "confusion_peu", "peu"),
 ];
 
 /// Phrases correctes : aucune suggestion grammaticale ne doit apparaître.
@@ -86,6 +105,11 @@ const CORRECT: &[&str] = &[
     "ils ont mangé",
     "son chat dort",
     "il se lève",
+    "ce livre est lourd",
+    "c'est une bonne idée",
+    "il s'est levé tôt",
+    "ces livres sont neufs",
+    "ses amis sont venus",
     "je vois les chats",
     "Jean dort et Marie mange",
     "elle est partie",
@@ -94,6 +118,27 @@ const CORRECT: &[&str] = &[
     "tout le monde est parti",
     "toutes les semaines",
     "toute la journée",
+    "le jour où je suis né",
+    "le jour ou la nuit",
+    "la maison est belle",
+    "il l'a vu hier",
+    "il la voit chaque jour",
+    "leur livre est neuf",
+    "leurs livres sont neufs",
+    "je leur parle",
+    "il peut marcher",
+    "un peu de sel",
+    // Robustesse de l'identification du sujet (consommation du POS) : ces
+    // phrases produisaient des faux positifs d'accord sujet–verbe / d'attribut
+    // avant que `conjugation` et `attribute` ne consomment les tags CRF.
+    "des points barres verticales de couleur",
+    "le problème qui nous a été posé",
+    "la démultiplication des usages digitaux alla de pair avec les risques",
+    "la nécessité grandissante de pouvoir redéployer des postes compromis",
+    "l'outil propulsé dans une nouvelle ère fut nommé",
+    // Proposition participiale : « père » (objet du participe présent
+    // « fatiguant ») n'est pas le sujet de « sont ».
+    "les filles fatiguant leur père sont fatigantes",
 ];
 
 #[test]

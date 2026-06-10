@@ -8,6 +8,7 @@ members = [
     "tools/compile-morpho",
     "tools/compile-dict",
     "tools/train-crf",
+    "tools/patch-morpho-gender",
 ]
 
 [workspace.package]

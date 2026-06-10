@@ -1,32 +1,23 @@
-//! Règle : homophones grammaticaux (a/à, ce/se, mes/mais, son/sont, on/ont).
+//! Règle : homophones grammaticaux (mes/mais, son/sont, on/ont).
+//!
+//! Les confusions **a/à** (tranche 1) et **ce/se, c'est/s'est** (tranche 2) ont
+//! leurs propres règles, adossées au CRF ([`crate::rules::confusion`], phase 6).
 //!
 //! La levée d'ambiguïté fiable réclame le contexte morphosyntaxique. Un premier
 //! jeu de corrections **à très haute précision** s'appuie sur le seul voisinage
 //! immédiat (jeton précédent / suivant) au sein d'une même phrase :
 //!
-//! - **a → à** : « a » précédé d'un verbe conjugué (autre qu'`avoir`) ne peut
-//!   être l'auxiliaire (« il va a Paris » → « à ») ;
-//! - **à → a / ont** : « à » précédé d'un pronom sujet (« il à faim » → « a »,
-//!   « ils à mangé » → « ont ») ;
 //! - **on → ont** / **son → sont** : forme précédée de `ils`/`elles`
 //!   (« ils on mangé » → « ont », « ils son partis » → « sont ») ;
 //! - **ont → on** : « ont » en tête de phrase suivi d'un verbe conjugué
 //!   (« Ont va au cinéma » → « On ») ;
-//! - **ce → se** : « ce » entre un pronom sujet et un verbe (« il ce lève » →
-//!   « se ») ;
 //! - **mes → mais** : « mes » suivi d'un pronom sujet (« mes je ne sais pas » →
 //!   « mais »).
 //!
 //! Depuis la phase 4, la règle exploite aussi les **étiquettes POS** du CRF
-//! ([`crate::pos`]) via [`Rule::check_tagged`], ce qui débloque des confusions
-//! jusque-là hors de portée des seules heuristiques de voisinage :
-//!
-//! - **se → ce** : « se » suivi d'un mot étiqueté nom/adjectif (« se petit chat
-//!   dort » → « ce ») — un « se » réflexif est toujours préverbal, donc « se »
-//!   devant un nom/adjectif est forcément « ce » ; le « se livre » verbal
-//!   légitime reste étiqueté verbe et ne déclenche pas.
-//!
-//! Lorsque l'étiqueteur « rattrape » l'erreur en donnant à la phrase fautive une
+//! ([`crate::pos`]) via [`Rule::check_tagged`] pour l'**étiquetage
+//! contrefactuel** : lorsque l'étiqueteur « rattrape » l'erreur en donnant à la
+//! phrase fautive une
 //! lecture plausible (le POS du voisin ne trahit alors plus la faute), on recourt
 //! à un **étiquetage contrefactuel** ([`COUNTERFACTUALS`]) : on compare le score
 //! POS du texte tel quel à celui obtenu en substituant la graphie alternative ;
@@ -40,7 +31,7 @@
 
 use super::{lexical_sentences, Rule};
 use crate::morpho;
-use crate::pos::{self, Tagged, Upos};
+use crate::pos::{self, Tagged};
 use crate::tokenizer::Token;
 use crate::Suggestion;
 
@@ -74,13 +65,6 @@ fn is_finite_verb(text: &str) -> bool {
     !morpho::verb_forms(text).is_empty()
 }
 
-/// Vrai si le jeton est un verbe conjugué dont aucun lemme n'est `avoir`
-/// (il ne peut donc pas tenir le rôle de l'auxiliaire « a »).
-fn is_finite_verb_not_avoir(text: &str) -> bool {
-    let forms = morpho::verb_forms(text);
-    !forms.is_empty() && !forms.iter().any(|v| v.lemma == "avoir")
-}
-
 /// Calque la casse initiale de `original` sur `replacement`.
 fn match_case(original: &str, replacement: &str) -> String {
     if !original.chars().next().is_some_and(|c| c.is_uppercase()) {
@@ -97,22 +81,11 @@ fn match_case(original: &str, replacement: &str) -> String {
 /// voisinage. Renvoie la forme corrigée (avant calque de casse), le cas échéant.
 fn correction(sentence: &[(usize, &Token)], i: usize) -> Option<&'static str> {
     let cur = normalize(sentence[i].1.text.as_str());
-    let prev = (i > 0).then(|| normalize(sentence[i - 1].1.text.as_str()));
     let next = sentence.get(i + 1).map(|(_, t)| normalize(t.text.as_str()));
     let prev_text = (i > 0).then(|| sentence[i - 1].1.text.as_str());
     let next_text = sentence.get(i + 1).map(|(_, t)| t.text.as_str());
 
     match cur.as_str() {
-        // a → à : « a » précédé d'un verbe conjugué non-`avoir`.
-        "a" if prev_text.is_some_and(is_finite_verb_not_avoir) => Some("à"),
-
-        // à → a / ont : « à » précédé d'un pronom sujet.
-        "à" => match prev.as_deref() {
-            Some("il" | "elle" | "on") => Some("a"),
-            Some("ils" | "elles") => Some("ont"),
-            _ => None,
-        },
-
         // on → ont : « on » précédé de ils/elles.
         "on" if prev_text.is_some_and(is_third_plural_pronoun) => Some("ont"),
 
@@ -122,32 +95,8 @@ fn correction(sentence: &[(usize, &Token)], i: usize) -> Option<&'static str> {
         // son → sont : « son » précédé de ils/elles.
         "son" if prev_text.is_some_and(is_third_plural_pronoun) => Some("sont"),
 
-        // ce → se : « ce » entre un pronom sujet et un verbe conjugué.
-        "ce" if prev_text.is_some_and(is_subject_pronoun)
-            && next_text.is_some_and(is_finite_verb) =>
-        {
-            Some("se")
-        }
-
         // mes → mais : « mes » suivi d'un pronom sujet.
         "mes" if next.as_deref().is_some_and(is_subject_pronoun) => Some("mais"),
-
-        _ => None,
-    }
-}
-
-/// Corrections d'homophones **fondées sur les étiquettes POS** du CRF, hors de
-/// portée des seules heuristiques de voisinage. `tags` est aligné sur la tranche
-/// complète des jetons ; on y accède via l'index d'origine `sentence[k].0`.
-fn correction_pos(sentence: &[(usize, &Token)], i: usize, tags: &[Tagged]) -> Option<&'static str> {
-    let cur = normalize(sentence[i].1.text.as_str());
-    let next_pos = sentence.get(i + 1).map(|(idx, _)| tags[*idx].upos);
-
-    match cur.as_str() {
-        // se → ce : « se » devant un nom (propre) ou un adjectif. Un « se »
-        // réflexif est toujours préverbal ; devant un nom/adjectif, c'est « ce ».
-        // Le « se livre » verbal légitime reste étiqueté verbe et ne déclenche pas.
-        "se" if matches!(next_pos, Some(Upos::Noun | Upos::Propn | Upos::Adj)) => Some("ce"),
 
         _ => None,
     }
@@ -229,7 +178,7 @@ impl Rule for HomophoneRule {
         suggestions
     }
 
-    fn check_tagged(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
+    fn check_tagged(&self, tokens: &[Token], _tags: &[Tagged]) -> Vec<Suggestion> {
         let mut suggestions = Vec::new();
         // Score POS du texte inchangé, calculé au plus une fois (seulement si un
         // candidat à l'étiquetage contrefactuel se présente).
@@ -237,14 +186,12 @@ impl Rule for HomophoneRule {
         for sentence in lexical_sentences(tokens) {
             for i in 0..sentence.len() {
                 let (idx, token) = sentence[i];
-                // 1. Heuristiques de voisinage, puis 2. corrections POS directes.
-                if let Some(c) =
-                    correction(&sentence, i).or_else(|| correction_pos(&sentence, i, tags))
-                {
+                // 1. Heuristiques de voisinage.
+                if let Some(c) = correction(&sentence, i) {
                     suggestions.push(suggestion(token, c));
                     continue;
                 }
-                // 3. Étiquetage contrefactuel (comparaison de scores des graphies).
+                // 2. Étiquetage contrefactuel (comparaison de scores des graphies).
                 let b = *base.get_or_insert_with(|| pos::best_score(tokens));
                 if let Some(c) = counterfactual(tokens, idx, b) {
                     suggestions.push(suggestion(token, c));
@@ -298,20 +245,6 @@ mod tests {
     }
 
     #[test]
-    fn a_to_a_grave_after_verb() {
-        assert_eq!(first("il va a Paris").as_deref(), Some("à"));
-        assert_eq!(first("elle pense a lui").as_deref(), Some("à"));
-        assert_eq!(first("il commence a manger").as_deref(), Some("à"));
-    }
-
-    #[test]
-    fn a_grave_to_a_after_pronoun() {
-        assert_eq!(first("il à faim").as_deref(), Some("a"));
-        assert_eq!(first("elle à un chat").as_deref(), Some("a"));
-        assert_eq!(first("ils à mangé").as_deref(), Some("ont"));
-    }
-
-    #[test]
     fn on_to_ont_after_plural() {
         assert_eq!(first("ils on mangé").as_deref(), Some("ont"));
         assert_eq!(first("elles on compris").as_deref(), Some("ont"));
@@ -328,63 +261,23 @@ mod tests {
     }
 
     #[test]
-    fn ce_to_se_between_subject_and_verb() {
-        assert_eq!(first("il ce lève").as_deref(), Some("se"));
-    }
-
-    #[test]
     fn mes_to_mais_before_pronoun() {
         assert_eq!(first("mes je ne sais pas").as_deref(), Some("mais"));
     }
 
     #[test]
-    fn case_is_preserved() {
-        assert_eq!(first("Il va a Paris").as_deref(), Some("à"));
-    }
-
-    #[test]
     fn correct_usages_yield_nothing() {
         for ok in [
-            "il a faim",          // « a » auxiliaire, prev pronom
-            "il va à Paris",      // « à » déjà correct
-            "il pense à lui",     // « à » après un verbe : correct
-            "on a mangé",         // « on » sujet
-            "ils ont mangé",      // « ont » correct
-            "son chat dort",      // « son » possessif
-            "ce livre est lourd", // « ce » démonstratif en tête
-            "mes amis sont là",   // « mes » possessif + nom
-            "il se lève",         // « se » déjà correct
+            "on a mangé",       // « on » sujet
+            "ils ont mangé",    // « ont » correct
+            "son chat dort",    // « son » possessif
+            "mes amis sont là", // « mes » possessif + nom
         ] {
             assert_eq!(count(ok), 0, "faux positif sur « {ok} »");
         }
     }
 
-    #[test]
-    fn no_cross_sentence_leak() {
-        // « va » (phrase 1) ne doit pas déclencher « a » de la phrase 2.
-        assert_eq!(count("il va. a b c"), 0);
-    }
-
-    // --- Corrections fondées sur les étiquettes POS (CRF). ---
-
-    #[test]
-    fn se_to_ce_before_noun_or_adjective() {
-        // « se » devant un nom (propre) ou un adjectif : c'est « ce ».
-        assert_eq!(first_tagged("il aime se chien").as_deref(), Some("ce"));
-        assert_eq!(first_tagged("se petit chat dort").as_deref(), Some("ce"));
-    }
-
-    #[test]
-    fn se_to_ce_preserves_case() {
-        assert_eq!(first_tagged("Se petit chat dort").as_deref(), Some("Ce"));
-    }
-
-    #[test]
-    fn se_before_verb_is_not_corrected() {
-        // « se » réflexif préverbal : aucune correction (pas de faux positif).
-        assert_eq!(count_tagged("il se livre à la lecture"), 0);
-        assert_eq!(count_tagged("il se lève"), 0);
-    }
+    // --- Étiquetage contrefactuel (CRF). ---
 
     #[test]
     fn counterfactual_sont_to_son() {
@@ -422,14 +315,14 @@ mod tests {
     #[test]
     fn check_tagged_keeps_heuristic_corrections() {
         // Le chemin POS conserve aussi les corrections de voisinage.
-        let tokens = tokenize("il va a Paris");
+        let tokens = tokenize("ils on mangé");
         let tags = crate::pos::tag(&tokens);
         let sugg = HomophoneRule.check_tagged(&tokens, &tags);
         assert_eq!(
             sugg.first()
                 .and_then(|s| s.replacements.first())
                 .map(String::as_str),
-            Some("à")
+            Some("ont")
         );
     }
 }

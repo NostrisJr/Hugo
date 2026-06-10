@@ -157,14 +157,42 @@ fn map_number(nombre: &str) -> u8 {
     }
 }
 
+/// Charge la liste curée d'override de genre (`gender-overrides.tsv`) : lemme →
+/// code de genre. Voir le tool `patch-morpho-gender` et le fichier lui-même pour
+/// la règle d'inclusion (uniquement des noms **certainement mono-genre**, jamais
+/// d'épicène ni de bi-genre). Comble les noms laissés sans genre par Lexique383.
+fn load_gender_overrides(path: &str) -> Result<BTreeMap<String, u8>, Box<dyn std::error::Error>> {
+    let mut map = BTreeMap::new();
+    for (n, line) in std::fs::read_to_string(path)?.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut cols = line.split('\t');
+        let gender = match (cols.next(), cols.next().map(str::trim)) {
+            (Some(lemma), Some("m")) if !lemma.is_empty() => (lemma, codes::GENDER_MASC),
+            (Some(lemma), Some("f")) if !lemma.is_empty() => (lemma, codes::GENDER_FEM),
+            _ => return Err(format!("override ligne {} invalide : « {line} »", n + 1).into()),
+        };
+        map.insert(gender.0.to_lowercase(), gender.1);
+    }
+    Ok(map)
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
-        eprintln!("Usage : compile-morpho <Lexique383.tsv> <base_de_sortie>");
+    if !(3..=4).contains(&args.len()) {
+        eprintln!(
+            "Usage : compile-morpho <Lexique383.tsv> <base_de_sortie> [gender-overrides.tsv]"
+        );
         return Err("arguments invalides".into());
     }
     let src = PathBuf::from(&args[1]);
     let base = &args[2];
+    let gender_overrides = match args.get(3) {
+        Some(path) => load_gender_overrides(path)?,
+        None => BTreeMap::new(),
+    };
     let fst_path = PathBuf::from(format!("{base}.fst"));
     let bin_path = PathBuf::from(format!("{base}.bin"));
     let freq_path = PathBuf::from(format!("{base}.freq.fst"));
@@ -269,8 +297,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut blob: Vec<u8> = Vec::new();
     let mut fst_builder = fst::MapBuilder::new(BufWriter::new(File::create(&fst_path)?))?;
+    let mut gender_filled = 0usize;
 
     for (form, mut analyses) in lexicon {
+        // Override de genre : on comble les analyses **nominales** sans genre dont
+        // le lemme figure dans la liste curée (jamais d'écrasement d'un genre connu).
+        for a in &mut analyses {
+            if a.cat == codes::CAT_NOUN && a.gender == codes::GENDER_NONE {
+                if let Some(&g) = gender_overrides.get(&a.lemma.to_lowercase()) {
+                    a.gender = g;
+                    gender_filled += 1;
+                }
+            }
+        }
         analyses.sort();
         let offset = blob.len() as u64;
         let count = analyses.len().min(255) as u64;
@@ -293,6 +332,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut bin = BufWriter::new(File::create(&bin_path)?);
     bin.write_all(&blob)?;
     bin.flush()?;
+    if !gender_overrides.is_empty() {
+        eprintln!(
+            "  override de genre : {gender_filled} analyses comblées ({} lemmes)",
+            gender_overrides.len()
+        );
+    }
 
     // FST de fréquences : forme → fréquence (×100). On n'inscrit que les formes
     // de fréquence non nulle pour limiter la taille.

@@ -2166,6 +2166,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "patch-morpho-gender"
+version = "0.1.0"
+dependencies = [
+ "fst",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
