@@ -20,6 +20,12 @@ const GRAMMAR_RULES: &[&str] = &[
     "confusion_la",
     "confusion_leur",
     "confusion_peu",
+    "confusion_quel",
+    "confusion_quand",
+    "confusion_sans",
+    "confusion_terminaison",
+    "past_participle_avoir",
+    "passive_participle",
 ];
 
 /// Suggestions grammaticales d'un texte (orthographe/capitalisation exclues).
@@ -80,6 +86,23 @@ const INCORRECT: &[(&str, &str, &str)] = &[
     ("je leurs parle", "confusion_leur", "leur"),
     ("il peu marcher", "confusion_peu", "peut"),
     ("un peut de sel", "confusion_peu", "peu"),
+    // Confusion quel/qu'elle, quand/quant, sans/s'en (tranche 4).
+    ("je crois quelle vient demain", "confusion_quel", "qu'elle"),
+    ("je me demande qu'elle heure il est", "confusion_quel", "quelle"),
+    ("quand à moi je reste", "confusion_quand", "quant"),
+    ("quant il pleut je lis", "confusion_quand", "quand"),
+    ("il sans va sans rien dire", "confusion_sans", "s'en"),
+    ("il a réussi s'en effort", "confusion_sans", "sans"),
+    // Confusion des terminaisons -er/-é/-ez (tranche 5).
+    ("il a manger une pomme", "confusion_terminaison", "mangé"),
+    ("il commence à mangé", "confusion_terminaison", "manger"),
+    ("vous manger trop de sucre", "confusion_terminaison", "mangez"),
+    // Participe passé avec avoir + COD antéposé (que/COD relatif).
+    ("les lettres qu'il a écrit", "past_participle_avoir", "écrites"),
+    ("les livres que j'ai lu", "past_participle_avoir", "lus"),
+    ("les décisions qu'on a prit", "past_participle_avoir", "prises"),
+    // Voix passive.
+    ("la lettre a été écris", "passive_participle", "écrite"),
 ];
 
 /// Phrases correctes : aucune suggestion grammaticale ne doit apparaître.
@@ -128,10 +151,23 @@ const CORRECT: &[&str] = &[
     "je leur parle",
     "il peut marcher",
     "un peu de sel",
+    "quelle heure est-il",
+    "je crois qu'elle vient",
+    "quand il pleut je lis",
+    "quant à moi je reste",
+    "il s'en va sans rien dire",
+    "il réussit sans effort",
+    // Terminaisons -er/-é/-ez (tranche 5) : usages corrects.
+    "il a mangé une pomme",
+    "il commence à manger",
+    "je veux manger ce soir",
+    "vous mangez trop de sucre",
+    "il veut vous voir demain",
+    "le saumon fumé est délicieux",
     // Robustesse de l'identification du sujet (consommation du POS) : ces
     // phrases produisaient des faux positifs d'accord sujet–verbe / d'attribut
     // avant que `conjugation` et `attribute` ne consomment les tags CRF.
-    "des points barres verticales de couleur",
+
     "le problème qui nous a été posé",
     "la démultiplication des usages digitaux alla de pair avec les risques",
     "la nécessité grandissante de pouvoir redéployer des postes compromis",
@@ -139,6 +175,25 @@ const CORRECT: &[&str] = &[
     // Proposition participiale : « père » (objet du participe présent
     // « fatiguant ») n'est pas le sujet de « sont ».
     "les filles fatiguant leur père sont fatigantes",
+    // Homographe préposition/adjectif : « sur » (ADP) n'est pas un attribut à
+    // accorder en « sure ».
+    "elle est sur le côté",
+    "la table est sur le côté",
+    // Audit faux positifs (corpus correct). Noms invariables en nombre :
+    "au cours de la journée",
+    "il a fait cela à la fois pour ses amis",
+    "cet homme est partout",
+    "cet article est intéressant",
+    // « N de N (de N) ADJ » : rattachement de l'adjectif ambigu → abstention.
+    "des outils de travail professionnels",
+    "une marge nette d'intérêts solide",
+    // « vous »/« nous » clitiques objets, pas sujets :
+    "notre expérience vous assure la réalisation",
+    "arrête la lecture si cela vous suffit",
+    // Attribut nominal et superlatif :
+    "les données sont la partie la plus visible",
+    // Terminaison : nom homographe d'un verbe après déterminant/préposition :
+    "il faut enrichir la base de données",
 ];
 
 #[test]

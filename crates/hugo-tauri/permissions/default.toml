@@ -1,5 +1,5 @@
 "$schema" = "schemas/schema.json"
 
 [default]
-description = "Permissions par défaut du plugin Hugo : autorise la vérification de texte."
-permissions = ["allow-check-text"]
+description = "Permissions par défaut du plugin Hugo : autorise la vérification de texte et la liste des règles."
+permissions = ["allow-check-text", "allow-list-rules"]

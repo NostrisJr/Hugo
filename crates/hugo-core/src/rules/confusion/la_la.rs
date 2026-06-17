@@ -58,32 +58,58 @@ fn has_masculine_noun_reading(form: &str) -> bool {
 /// quelques adverbes (« il la déjà vu »). Le test [`is_past_participle`] (verbe
 /// sans personne, porteur d'un genre/nombre) écarte déjà les formes **finies**
 /// présentes (« il la voit » : « la » est l'objet d'un verbe conjugué, à laisser).
-fn participle_follows(sentence: &[(usize, &Token)], i: usize) -> bool {
+///
+/// Le candidat doit en outre être **étiqueté `VERB`** par le CRF : cela écarte
+/// les homographes au participe parasite au lexique (« la **plus** visible » :
+/// « plus » a une lecture « participe » fantôme mais le CRF l'étiquette `ADV`,
+/// superlatif — ce n'est pas « l'a »).
+fn participle_follows(sentence: &[(usize, &Token)], i: usize, tags: &[Tagged]) -> bool {
     let mut k = i + 1;
     while let Some((_, tok)) = sentence.get(k) {
         if SKIP_BEFORE_PARTICIPLE.contains(&normalize(&tok.text).as_str()) {
             k += 1;
             continue;
         }
-        return is_past_participle(&tok.text);
+        return upos(sentence, k, tags) == Upos::Verb && is_past_participle(&tok.text);
     }
     false
 }
 
-/// Correction d'un « là » en « la » : devant un nom non explicitement masculin.
+/// Vrai si `form` est un infinitif (sa forme équivaut à son lemme verbal).
+fn is_infinitive(form: &str) -> bool {
+    morpho::lookup(form)
+        .iter()
+        .any(|m| m.category == MorphCategory::Verb && m.lemma.eq_ignore_ascii_case(form))
+}
+
+/// Correction d'un « là » en « la » : devant un nom non explicitement masculin,
+/// ou devant un infinitif précédé d'un verbe conjugué (« elle va là voir » →
+/// « elle va la voir » — « là » est ici un pronom COD, non un adverbe de lieu).
 fn correction_la_grave(
     sentence: &[(usize, &Token)],
     i: usize,
     tags: &[Tagged],
 ) -> Option<&'static str> {
     let next = sentence.get(i + 1)?;
-    (upos(sentence, i + 1, tags) == Upos::Noun && !has_masculine_noun_reading(&next.1.text))
-        .then_some("la")
+    // Cas 1 : là + NOM (article confondu avec adverbe de lieu).
+    if upos(sentence, i + 1, tags) == Upos::Noun && !has_masculine_noun_reading(&next.1.text) {
+        return Some("la");
+    }
+    // Cas 2 : VERBE_FINI + là + INFINITIF → « la » pronom COD.
+    // « Elle va là voir » → « Elle va la voir ».
+    if i > 0
+        && upos(sentence, i + 1, tags) == Upos::Verb
+        && is_infinitive(&next.1.text)
+        && matches!(upos(sentence, i - 1, tags), Upos::Verb | Upos::Aux)
+    {
+        return Some("la");
+    }
+    None
 }
 
 /// Correction d'un « la » en « l'a » : sujet 3ᵉ pers. + la + participe passé.
 fn correction_la(sentence: &[(usize, &Token)], i: usize, tags: &[Tagged]) -> Option<&'static str> {
-    if i == 0 || !participle_follows(sentence, i) {
+    if i == 0 || !participle_follows(sentence, i, tags) {
         return None;
     }
     let subj = normalize(sentence[i - 1].1.text.as_str());
@@ -196,6 +222,15 @@ mod tests {
         ] {
             assert_eq!(count(ok), 0, "faux positif sur « {ok} »");
         }
+    }
+
+    #[test]
+    fn superlative_la_plus_is_not_l_a() {
+        // « la plus visible » : superlatif (article + « plus » ADV + adjectif).
+        // « plus » a un participe fantôme au lexique, mais le CRF l'étiquette
+        // ADV → pas de fausse correction « l'a ».
+        assert_eq!(count("la partie la plus visible de toutes"), 0);
+        assert_eq!(count("c'est la plus belle de la classe"), 0);
     }
 
     #[test]

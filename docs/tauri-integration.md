@@ -13,10 +13,17 @@ binaire.
 
 ## 1. Vue d'ensemble
 
-Le plugin expose une seule commande, `check_text`, qui prend une chaîne et
-renvoie la liste des suggestions de correction. Côté Rust, un unique
-[`Checker`] est construit au démarrage et partagé via l'état de l'application
-(`app.manage`), si bien que les dictionnaires ne sont chargés qu'une fois.
+Le plugin expose deux commandes :
+
+- `check_text` — prend une chaîne (et, optionnellement, une liste de règles à
+  désactiver) et renvoie les suggestions de correction ;
+- `list_rules` — renvoie le **catalogue** des règles (`id` + `name`), pour
+  construire une interface d'activation/désactivation.
+
+Côté Rust, un unique [`Checker`] est construit au démarrage et partagé via
+l'état de l'application (`app.manage`), si bien que les dictionnaires ne sont
+chargés qu'une fois. Le `Checker` reste **immuable** : l'activation des règles
+se choisit **par appel** (rien à reconstruire).
 
 ```
 ┌────────────┐   invoke("plugin:hugo-tauri|check_text")   ┌──────────────┐
@@ -85,16 +92,18 @@ par défaut du plugin à votre capability principale (par ex.
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "hugo-tauri:allow-check-text"
+    "hugo-tauri:default"
   ]
 }
 ```
 
 | Permission | Effet |
 |---|---|
-| `hugo-tauri:default` | Jeu par défaut ; inclut `allow-check-text`. |
+| `hugo-tauri:default` | Jeu par défaut ; inclut `allow-check-text` **et** `allow-list-rules`. |
 | `hugo-tauri:allow-check-text` | Autorise la commande `check_text`. |
 | `hugo-tauri:deny-check-text` | Refuse explicitement la commande. |
+| `hugo-tauri:allow-list-rules` | Autorise la commande `list_rules`. |
+| `hugo-tauri:deny-list-rules` | Refuse explicitement la commande. |
 
 > **⚠️ Cohérence des noms** — L'espace de noms des permissions (`hugo-tauri:`)
 > provient du **nom de crate** du plugin, tandis que la chaîne d'`invoke`
@@ -141,10 +150,40 @@ export interface HugoSuggestion {
 
 import { invoke } from "@tauri-apps/api/core";
 
-export function checkText(text: string): Promise<HugoSuggestion[]> {
-  return invoke("plugin:hugo-tauri|check_text", { text });
+export function checkText(
+  text: string,
+  disabledRules: string[] = [],
+): Promise<HugoSuggestion[]> {
+  return invoke("plugin:hugo-tauri|check_text", { text, disabledRules });
 }
 ```
+
+### Activer / désactiver des règles
+
+`check_text` accepte une liste **optionnelle** `disabledRules` : les `ruleId`
+qu'elle contient sont ignorés le temps de l'appel (absente ou vide → toutes les
+règles actives). Pour bâtir une interface de préférences, récupérez d'abord le
+catalogue via `list_rules`, puis renvoyez les règles décochées :
+
+```ts
+export interface HugoRule {
+  /** Identifiant stable, à placer dans `disabledRules`. */
+  id: string;
+  /** Nom lisible (français). */
+  name: string;
+}
+
+export function listRules(): Promise<HugoRule[]> {
+  return invoke("plugin:hugo-tauri|list_rules");
+}
+
+// Exemple : ne pas signaler les guillemets ni les répétitions de mot.
+const suggestions = await checkText(text, ["typo_quotes", "duplicate_word"]);
+```
+
+> L'orthographe se désactive comme une règle, via l'`id` `spelling`. Stockez les
+> `id` décochés dans les préférences de votre application et passez-les à chaque
+> appel — le `Checker` partagé n'a pas besoin d'être reconstruit.
 
 > **Offsets en octets** — `start` / `end` sont des offsets d'**octets** UTF-8,
 > pas des index de caractères JavaScript. Pour découper la chaîne côté JS sans
@@ -190,6 +229,19 @@ function onInput(text: string, render: (s: HugoSuggestion[]) => void) {
 | `subject_verb_agreement` | Accord sujet–verbe | « les chats mange » → « mangent » |
 | `attribute_adjective_agreement` | Accord de l'attribut | « elle est content » → « contente » |
 | `homophone` | Homophones grammaticaux | « il va a Paris » → « à » |
+| `confusion_*` | Confusions (a/à, ce/se, ou/où, leur/leurs…) | « il ce lève » → « se » |
+| `typo_apostrophe` | Apostrophe typographique | « l'homme » → « l'homme » |
+| `typo_ellipsis` | Points de suspension | « attends... » → « … » |
+| `typo_punct_doubling` | Doublon de ponctuation | « quoi!! » → « ! » |
+| `typo_space` | Espaces surnuméraires/manquants | « le  chat » → « le chat » |
+| `typo_nbsp` | Espaces insécables | « vraiment ? » → fine insécable |
+| `typo_quotes` | Guillemets français | « "oui" » → « « oui » » |
+| `typo_ligature` | Ligature œ | « coeur » → « cœur » |
+| `typo_ordinal` | Abréviation ordinale | « 1ère » → « 1re » |
+
+La liste **complète et à jour** (avec les noms lisibles) est fournie à
+l'exécution par la commande `list_rules` ; ne codez pas ce tableau en dur côté
+front si vous proposez des préférences.
 
 Utilisez `ruleId` pour styliser différemment les soulignements (rouge pour
 `spelling`, bleu pour la grammaire, etc.) ou pour filtrer les catégories que

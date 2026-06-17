@@ -13,23 +13,45 @@
 //! via [`lexical_sentences`], afin que le dernier mot d'une phrase ne soit pas
 //! pris pour le voisin du premier mot de la suivante.
 
+pub mod adjectif_verbal;
 pub mod agreement;
 pub mod attribute;
 pub mod capitalization;
 pub mod confusion;
 pub mod conjugation;
+pub mod demi;
+pub mod detached_appositive;
 pub mod duplicates;
+pub mod elision;
 pub mod epithet;
 pub mod homophones;
+pub mod imperatif;
+pub mod locutions;
+pub mod numeraux;
+pub mod passive_participle;
 pub mod past_participle;
 pub mod pronominal_participle;
 pub mod quantifier;
 pub mod special_agreement;
 pub mod subjunctive;
+pub mod trait_union;
+pub mod typography;
 
+use crate::morpho::Morph;
 use crate::pos::Tagged;
 use crate::tokenizer::{Token, TokenKind};
 use crate::Suggestion;
+
+/// Vrai si un nom est **invariable en nombre** : sa forme du singulier (le
+/// lemme) se termine déjà par -s/-x/-z, si bien que le pluriel est identique
+/// (« cours », « fois », « prix », « nez »). De tels noms ne doivent pas
+/// déclencher d'accord en **nombre** — ils sont compatibles avec le singulier
+/// comme le pluriel. Partagé par les accords déterminant–nom et épithète.
+pub(crate) fn is_number_invariable(noun_analyses: &[Morph]) -> bool {
+    noun_analyses
+        .iter()
+        .any(|m| matches!(m.lemma.chars().next_back(), Some('s' | 'x' | 'z')))
+}
 
 /// Une règle de correction grammaticale.
 ///
@@ -72,6 +94,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(quantifier::ToutAgreement),
         Box::new(special_agreement::SpecialAgreement),
         Box::new(past_participle::PastParticipleAvoir),
+        Box::new(passive_participle::PassiveParticiple),
         Box::new(subjunctive::SubjunctiveAfterConjunction),
         Box::new(confusion::AAConfusion),
         Box::new(confusion::CeSeConfusion),
@@ -79,7 +102,36 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(confusion::LaConfusion),
         Box::new(confusion::LeurConfusion),
         Box::new(confusion::PeuConfusion),
+        Box::new(confusion::QuelConfusion),
+        Box::new(confusion::QuandConfusion),
+        Box::new(confusion::SansConfusion),
+        Box::new(confusion::TerminaisonsConfusion),
         Box::new(homophones::HomophoneRule),
+        Box::new(imperatif::ImperatifGroupe1),
+        // Phase 8 — élisions et contractions obligatoires.
+        Box::new(elision::ElisionRule),
+        // Phase 9 — confusions et homophones restants.
+        Box::new(confusion::EtEstConfusion),
+        Box::new(confusion::SaCaConfusion),
+        Box::new(confusion::NiNyConfusion),
+        Box::new(confusion::PresPreConfusion),
+        Box::new(confusion::DansDenConfusion),
+        Box::new(confusion::PlutotConfusion),
+        Box::new(confusion::AccentsConfusion),
+        // Phase 10 — accords avancés, traits d'union, numéraux.
+        Box::new(numeraux::NumerauxRule),
+        Box::new(demi::DemiRule),
+        Box::new(locutions::LocutionsRule),
+        Box::new(trait_union::TraitUnionRule),
+        Box::new(adjectif_verbal::AdjectifVerbalRule),
+        // Phase 12 — apposition détachée avec sujet postposé.
+        Box::new(detached_appositive::DetachedAppositive),
+        // Phase 7 — typographie, ponctuation, espaces, nombres (déterministe).
+        Box::new(typography::EllipsisRule),
+        Box::new(typography::PunctDoublingRule),
+        Box::new(typography::SpacingRule),
+        Box::new(typography::LigatureRule),
+        Box::new(typography::OrdinalRule),
     ]
 }
 
@@ -96,7 +148,7 @@ pub(crate) fn lexical_tokens(tokens: &[Token]) -> Vec<(usize, &Token)> {
 
 /// Vrai si le jeton est une ponctuation marquant une frontière de phrase
 /// (point, point d'exclamation/d'interrogation, points de suspension,
-/// point-virgule, deux-points).
+/// point-virgule, deux-points, ou backslash utilisé comme saut de ligne doux).
 fn is_sentence_terminator(token: &Token) -> bool {
     token.kind == TokenKind::Punctuation
         && matches!(token.text.as_str(), "." | "!" | "?" | "…" | ";" | ":")

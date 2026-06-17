@@ -2,23 +2,24 @@
 //! **complément d'objet direct antéposé**.
 //!
 //! Avec « avoir », le participe passé s'accorde en genre et en nombre avec le
-//! COD **lorsque celui-ci précède** le verbe : « je les ai vu » → « vus », « il
-//! la avait prise » est correct, « il les a mis » → « mis » déjà accordé.
+//! COD **lorsque celui-ci précède** le verbe. Deux constructions sont gérées :
 //!
-//! Le COD antéposé est ici un **pronom clitique objet non ambigu** :
+//! **1. Pronom clitique COD** (`la`, `les`) immédiatement avant l'auxiliaire :
 //!
-//! - **les** → pluriel (genre indéterminé) : on propose les deux graphies
-//!   (« je les ai vu » → « vus » / « vues ») quand le participe est au singulier ;
-//! - **la** → féminin singulier (« il la a vu » → « vue »).
+//! - **les** → pluriel (genre indéterminé) : on propose les deux graphies ;
+//! - **la** → féminin singulier.
+//!
+//! **2. Relative avec « que/qu' »** : l'antécédent (nom commun au genre connu)
+//! joue le rôle de COD. Ex. « Les livres que j'ai lu » → « lus ».
+//!   Pattern : `[DET] NOM [que/qu'] SUJET avoir PARTICIPE`.
+//!   La règle remonte jusqu'au nom immédiatement avant « que/qu' ».
 //!
 //! Sont volontairement écartés, faute de signal fiable :
 //!
-//! - `me`/`te`/`nous`/`vous`, qui peuvent être **sujets** (« nous avons vu » —
-//!   pas d'accord — contre « il nous a vus ») ;
-//! - `l'`, dont le genre est indéterminé et le nombre déjà singulier.
+//! - `me`/`te`/`nous`/`vous`, qui peuvent être **sujets** ;
+//! - `l'`, dont le genre est indéterminé.
 //!
-//! La construction est repérée par le motif lexical « clitique, auxiliaire
-//! avoir, participe », confirmé par l'étiquette POS `PRON` du clitique
+//! La construction clitique est confirmée par l'étiquette POS `PRON`
 //! ([`Rule::check_tagged`]).
 
 use super::{lexical_sentences, Rule};
@@ -61,6 +62,67 @@ fn cod_features(text: &str) -> Option<(Option<Gender>, Number)> {
     }
 }
 
+/// Valeur unique d'un trait à travers des analyses, ou `None` si contradictoire.
+fn consensus<T: PartialEq + Copy>(values: impl Iterator<Item = Option<T>>) -> Option<T> {
+    let mut found: Option<T> = None;
+    for v in values.flatten() {
+        match found {
+            None => found = Some(v),
+            Some(prev) if prev == v => {}
+            Some(_) => return None,
+        }
+    }
+    found
+}
+
+/// Genre overrides pour les noms courants absents de Lexique383.
+fn gender_override(lemma: &str) -> Option<Gender> {
+    Some(match lemma {
+        "livre" | "mot" | "film" | "repas" | "vin" | "poème" | "roman" | "devoir"
+        | "projet" | "article" | "texte" | "rapport" | "document" | "dossier"
+        | "tableau" | "dessin" | "trait" | "cœur"
+        | "résultat" | "sujet" | "nombre" | "problème" | "exemple" | "chapitre"
+        | "paragraphe" | "programme" | "discours" | "dialogue" | "argument"
+        | "téléphone" | "billet" | "cadeau" | "repère" | "récit" | "passage" => {
+            Gender::Masculine
+        }
+        _ => return None,
+    })
+}
+
+/// Genre et nombre d'un nom commun (via le lexique), ou `None` si ambigu.
+/// Les épicènes sont écartés car leur genre ne peut pas trancher l'accord.
+fn noun_features(text: &str) -> Option<(Gender, Number)> {
+    let nouns: Vec<_> = morpho::lookup(text)
+        .into_iter()
+        .filter(|m| m.category == MorphCategory::Noun)
+        .collect();
+    if nouns.is_empty() {
+        return None;
+    }
+    let number = consensus(nouns.iter().map(|m| m.number))?;
+    let gender_lex = consensus(nouns.iter().map(|m| m.gender));
+    use morpho::Gender::Epicene;
+    // Si le lexique donne un genre (non épicène), on l'utilise directement.
+    // Sinon, on tente l'override statique pour les noms courants mal renseignés.
+    let gender = match gender_lex {
+        Some(g) if g != Epicene => g,
+        _ => {
+            let lemma = nouns[0].lemma.as_str();
+            gender_override(lemma).or_else(|| gender_lex.filter(|g| *g != Epicene))?
+        }
+    };
+    Some((gender, number))
+}
+
+/// Vrai si la forme est un pronom sujet courant (entre « que » et l'auxiliaire).
+fn is_subject_pronoun(text: &str) -> bool {
+    matches!(
+        normalize(text).as_str(),
+        "je" | "j" | "tu" | "il" | "elle" | "on" | "nous" | "vous" | "ils" | "elles"
+    )
+}
+
 /// Vrai si le jeton est une forme conjuguée de l'auxiliaire « avoir ».
 fn is_avoir(text: &str) -> bool {
     morpho::verb_forms(text).iter().any(|v| v.lemma == "avoir")
@@ -89,14 +151,50 @@ fn is_skippable_adverb(text: &str) -> bool {
 
 /// Analyses « participe passé » d'une forme (verbe sans personne, porteur d'un
 /// genre et d'un nombre).
+///
+/// Repli : pour les PP irréguliers dont le masculin singulier est homographe
+/// d'une forme conjuguée dans le Lefff (« écrit » = 3e sg prés. + PP m.sg.),
+/// on synthétise une entrée PP en croisant la lecture verbale (pour le lemme)
+/// et la lecture adjectivale (pour le genre et le nombre).
 fn participles(text: &str) -> Vec<Morph> {
-    morpho::lookup(text)
-        .into_iter()
+    let all = morpho::lookup(text);
+
+    let direct: Vec<_> = all
+        .iter()
         .filter(|m| {
             m.category == MorphCategory::Verb
                 && m.person.is_none()
                 && m.gender.is_some()
                 && m.number.is_some()
+        })
+        .cloned()
+        .collect();
+    if !direct.is_empty() {
+        return direct;
+    }
+
+    // Repli : lemme verbal unique + lectures adjectivales portant genre/nombre.
+    let verb_lemmas: std::collections::HashSet<&str> = all
+        .iter()
+        .filter(|m| m.category == MorphCategory::Verb)
+        .map(|m| m.lemma.as_str())
+        .collect();
+    if verb_lemmas.len() != 1 {
+        return vec![];
+    }
+    let lemma = verb_lemmas.into_iter().next().unwrap();
+    all.iter()
+        .filter(|m| {
+            m.category == MorphCategory::Adjective
+                && m.gender.is_some()
+                && m.number.is_some()
+        })
+        .map(|m| Morph {
+            lemma: lemma.to_string(),
+            category: MorphCategory::Verb,
+            gender: m.gender,
+            number: m.number,
+            person: None,
         })
         .collect()
 }
@@ -109,6 +207,48 @@ fn unique_lemma(analyses: &[Morph]) -> Option<&str> {
 }
 
 impl PastParticipleAvoir {
+    /// Génère les suggestions d'accord pour un participe dont on connaît le
+    /// genre (optionnel) et le nombre imposés par le COD.
+    fn suggest(
+        parts: &[Morph],
+        part_token: &Token,
+        gender: Option<Gender>,
+        number: Number,
+        msg: &str,
+    ) -> Option<Suggestion> {
+        // Déjà accordé ?
+        if parts
+            .iter()
+            .any(|m| m.number == Some(number) && gender.map_or(true, |g| m.gender == Some(g)))
+        {
+            return None;
+        }
+        let lemma = unique_lemma(parts)?;
+        let genders: &[Gender] = match gender {
+            Some(Gender::Feminine) => &[Gender::Feminine],
+            Some(Gender::Masculine) => &[Gender::Masculine],
+            _ => &[Gender::Masculine, Gender::Feminine],
+        };
+        let mut replacements: Vec<String> = Vec::new();
+        for &g in genders {
+            if let Some(form) = morpho::participle(lemma, g, number) {
+                let cased = match_case(&part_token.text, &form);
+                if !cased.eq_ignore_ascii_case(&part_token.text) && !replacements.contains(&cased) {
+                    replacements.push(cased);
+                }
+            }
+        }
+        if replacements.is_empty() {
+            return None;
+        }
+        Some(Suggestion {
+            span: part_token.span,
+            message: msg.to_string(),
+            replacements,
+            rule_id: RULE_ID,
+        })
+    }
+
     /// Cœur de la règle. `pron_ok(idx)` confirme que le jeton d'index d'origine
     /// `idx` est bien un pronom (filtre POS optionnel).
     fn run(&self, tokens: &[Token], pron_ok: impl Fn(usize) -> bool) -> Vec<Suggestion> {
@@ -116,7 +256,26 @@ impl PastParticipleAvoir {
         for lex in lexical_sentences(tokens) {
             for p in 0..lex.len() {
                 let parts = participles(&lex[p].1.text);
-                if parts.is_empty() {
+                // Repli : pour les formes verbales finies sans lecture PP ni
+                // adjectivale (ex. « prit » = PS 3sg de « prendre »), on garde
+                // quand même le lemme pour tenter la correction — mais seulement
+                // via le chemin relatif (chemin 2) où le contexte est plus sûr.
+                let verb_lemma_fallback: Option<String> = if parts.is_empty() {
+                    let all = morpho::lookup(&lex[p].1.text);
+                    let vl: std::collections::HashSet<&str> = all
+                        .iter()
+                        .filter(|m| m.category == MorphCategory::Verb)
+                        .map(|m| m.lemma.as_str())
+                        .collect();
+                    if vl.len() == 1 {
+                        Some(vl.into_iter().next().unwrap().to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if parts.is_empty() && verb_lemma_fallback.is_none() {
                     continue;
                 }
 
@@ -137,59 +296,81 @@ impl PastParticipleAvoir {
                     continue;
                 }
 
-                // COD antéposé : jeton immédiatement avant l'auxiliaire.
+                // --- Chemin 1 : pronom clitique COD (« la »/« les ») avant l'auxiliaire. ---
                 let cod = lex[a - 1];
-                let Some((gender, number)) = cod_features(&cod.1.text) else {
-                    continue;
-                };
-                if !pron_ok(cod.0) {
-                    continue;
+                if let Some((gender, number)) = cod_features(&cod.1.text) {
+                    if pron_ok(cod.0) {
+                        if let Some(s) = Self::suggest(
+                            &parts,
+                            lex[p].1,
+                            gender,
+                            number,
+                            &format!(
+                                "Accord du participe passé : « {} » doit s'accorder avec le \
+                                 complément d'objet direct antéposé.",
+                                lex[p].1.text
+                            ),
+                        ) {
+                            suggestions.push(s);
+                        }
+                    }
+                    continue; // clitique trouvé, chemin relatif inapplicable
                 }
 
-                // Déjà accordé ? (une analyse de participe compatible suffit)
-                let agrees = parts.iter().any(|m| {
-                    m.number == Some(number) && gender.map_or(true, |g| m.gender == Some(g))
-                });
-                if agrees {
+                // --- Chemin 2 : relatif « que/qu' » — NOM [que/qu'] SUJET avoir PARTICIPE. ---
+                // Structure : lex[a-2] = que/qu', lex[a-1] = sujet, lex[a-3…] = nom antécédent.
+                if a < 2 {
                     continue;
                 }
-
-                let Some(lemma) = unique_lemma(&parts) else {
+                let que_tok = &lex[a - 2].1.text;
+                if !matches!(normalize(que_tok).as_str(), "que" | "qu") {
+                    continue;
+                }
+                // Le token entre « que » et l'auxiliaire doit être un sujet courant.
+                if !is_subject_pronoun(&lex[a - 1].1.text) {
+                    continue;
+                }
+                // Antécédent : nom immédiatement avant « que/qu' ».
+                if a < 3 {
+                    continue;
+                }
+                let antecedent = lex[a - 3].1;
+                let Some((gender, number)) = noun_features(&antecedent.text) else {
                     continue;
                 };
-
-                // Génération : si le genre est connu, une forme ; sinon (les) les
-                // deux graphies plurielles, masculin d'abord (défaut conventionnel).
-                let genders: &[Gender] = match gender {
-                    Some(Gender::Feminine) => &[Gender::Feminine],
-                    Some(Gender::Masculine) => &[Gender::Masculine],
-                    _ => &[Gender::Masculine, Gender::Feminine],
-                };
-                let mut replacements: Vec<String> = Vec::new();
-                for &g in genders {
-                    if let Some(form) = morpho::participle(lemma, g, number) {
-                        let cased = match_case(&lex[p].1.text, &form);
-                        if !cased.eq_ignore_ascii_case(&lex[p].1.text)
-                            && !replacements.contains(&cased)
-                        {
-                            replacements.push(cased);
+                // Chemin normal : parts non vide → suggestion classique.
+                if !parts.is_empty() {
+                    if let Some(s) = Self::suggest(
+                        &parts,
+                        lex[p].1,
+                        Some(gender),
+                        number,
+                        &format!(
+                            "Accord du participe passé : « {} » doit s'accorder avec le nom \
+                             antécédent « {} » (COD du relatif).",
+                            lex[p].1.text, antecedent.text
+                        ),
+                    ) {
+                        suggestions.push(s);
+                    }
+                } else if let Some(ref lemma) = verb_lemma_fallback {
+                    // Repli : forme finie (ex. « prit » = PS) en position PP →
+                    // on génère directement la forme correcte attendue.
+                    if let Some(expected) = morpho::participle(lemma, gender, number) {
+                        if !expected.eq_ignore_ascii_case(&lex[p].1.text) {
+                            suggestions.push(Suggestion {
+                                span: lex[p].1.span,
+                                message: format!(
+                                    "Accord du participe passé : « {} » doit s'accorder avec le \
+                                     nom antécédent « {} » (COD du relatif).",
+                                    lex[p].1.text, antecedent.text
+                                ),
+                                replacements: vec![match_case(&lex[p].1.text, &expected)],
+                                rule_id: RULE_ID,
+                            });
                         }
                     }
                 }
-                if replacements.is_empty() {
-                    continue;
-                }
-
-                suggestions.push(Suggestion {
-                    span: lex[p].1.span,
-                    message: format!(
-                        "Accord du participe passé : « {} » doit s'accorder avec le complément \
-                         d'objet direct antéposé.",
-                        lex[p].1.text
-                    ),
-                    replacements,
-                    rule_id: RULE_ID,
-                });
             }
         }
         suggestions

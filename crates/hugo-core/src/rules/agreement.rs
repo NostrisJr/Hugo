@@ -12,7 +12,7 @@
 //! Exemples : « un belle table » → « une », « les chat » → « le »,
 //! « le chats » → « les ».
 
-use super::{lexical_tokens, Rule};
+use super::{is_number_invariable, lexical_tokens, Rule};
 use crate::morpho::{self, Gender, MorphCategory, Number};
 use crate::pos::{Tagged, Upos};
 use crate::tokenizer::Token;
@@ -164,15 +164,31 @@ fn agree(det_token: &Token, det: &DetInfo, noun: &Token) -> Option<Suggestion> {
         GenderC::Any => None,
     };
     let target_gender = noun_gender.or(det_gender);
-    let target_plural = match noun_number {
-        Some(Number::Singular) => false,
-        Some(Number::Plural) => true,
-        _ => det.plural,
+    // Un nom **invariable en nombre** (singulier déjà terminé par -s/-x/-z :
+    // « cours », « fois », « fils », « prix ») a la même forme aux deux nombres ;
+    // Lexique ne lui prête souvent qu'une analyse « pluriel ». On ne corrige donc
+    // pas le nombre du déterminant (« au cours », « à la fois » sont corrects) —
+    // seul un désaccord de **genre** subsiste.
+    let target_plural = if is_number_invariable(&noun_analyses) {
+        det.plural
+    } else {
+        match noun_number {
+            Some(Number::Singular) => false,
+            Some(Number::Plural) => true,
+            _ => det.plural,
+        }
     };
 
     let corrected = corrected_form(det.family, target_gender, target_plural)?;
     if corrected.eq_ignore_ascii_case(&det_lower) {
         return None; // déjà accordé
+    }
+    // Allomorphes « ce » / « cet » : « cet » est le démonstratif masculin
+    // singulier devant voyelle ou h-muet (« cet homme », « cet été »). Il est
+    // correct — ne pas le « corriger » en « ce » (la distinction est phonétique,
+    // pas un accord).
+    if det_lower == "cet" && corrected == "ce" {
+        return None;
     }
     Some(Suggestion {
         span: det_token.span,

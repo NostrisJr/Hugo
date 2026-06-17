@@ -1,7 +1,7 @@
 //! Règle : détection de mots doublés (`il il` → `il`).
 
 use super::{lexical_tokens, Rule};
-use crate::tokenizer::Token;
+use crate::tokenizer::{Token, TokenKind};
 use crate::Suggestion;
 
 /// Détecte deux mots identiques consécutifs (à la casse près) et propose de
@@ -20,12 +20,21 @@ impl Rule for DuplicateWord {
         let mut suggestions = Vec::new();
 
         for pair in lex.windows(2) {
-            let (_, prev) = pair[0];
-            let (_, cur) = pair[1];
+            let (orig_i, prev) = pair[0];
+            let (orig_j, cur) = pair[1];
 
             // On ne compare que des mots pleins, pas les élisions ni les mots
             // d'une seule lettre.
             if prev.text.chars().count() <= 1 {
+                continue;
+            }
+
+            // Un saut de ligne doux (\) entre les deux mots = répétition poétique
+            // intentionnelle, pas un doublon accidentel.
+            let soft_break_between = tokens[orig_i + 1..orig_j]
+                .iter()
+                .any(|t| t.kind == TokenKind::Punctuation && t.text == "\\");
+            if soft_break_between {
                 continue;
             }
 
@@ -91,6 +100,14 @@ mod tests {
         let tokens = tokenize("Le le chat");
         let suggestions = DuplicateWord.check(&tokens);
         assert_eq!(suggestions.len(), 1);
+    }
+
+    #[test]
+    fn test_soft_break_not_flagged() {
+        // Anaphore poétique : même mot de part et d'autre d'un saut doux.
+        let tokens = tokenize("vole\\Vole encore");
+        let suggestions = DuplicateWord.check(&tokens);
+        assert_eq!(suggestions.len(), 0);
     }
 
     #[test]

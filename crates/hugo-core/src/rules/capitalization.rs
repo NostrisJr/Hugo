@@ -5,16 +5,37 @@ use crate::tokenizer::{Token, TokenKind};
 use crate::Suggestion;
 
 /// Signale un mot en minuscule juste après une ponctuation terminale
-/// (`.`, `!`, `?`, `…`) et propose sa capitalisation.
+/// (`.`, `!`, `?`) et propose sa capitalisation.
 ///
-/// Ne se déclenche pas après une abréviation courante (`M.`, `Mme`, `etc.`…)
-/// ni après un point appartenant à un nombre décimal.
+/// Ne se déclenche pas :
+/// - après une abréviation courante (`M.`, `Mme`, `etc.`…) ni après un point
+///   appartenant à un nombre décimal ;
+/// - à l'intérieur d'une parenthèse (« le projet (livré tard !) avance ») : la
+///   phrase porteuse se poursuit après la parenthèse ;
+/// - après des **points de suspension** suivis d'une **minuscule** : « … » est
+///   un terminateur ambigu ; une minuscule signale une suspension intra-phrase
+///   (« il hésita… puis partit »), pas une nouvelle phrase. On présume alors la
+///   continuation (précision > rappel).
 pub struct CapitalizationAfterPeriod;
 
 const RULE_ID: &str = "capitalization_after_period";
 
-/// Ponctuations considérées comme terminant une phrase.
-const TERMINAL_PUNCT: &[&str] = &[".", "!", "?", "…"];
+/// Terminateurs **fermes** : imposent une majuscule au mot suivant.
+const HARD_TERMINAL_PUNCT: &[&str] = &[".", "!", "?"];
+
+/// Points de suspension : terminateur **ambigu** (cf. [`Pending::Ellipsis`]).
+const ELLIPSIS: &str = "…";
+
+/// État de fin de phrase « en attente » d'un mot.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    /// Aucun terminateur en attente.
+    None,
+    /// Terminateur ferme (`.`/`!`/`?`) : une minuscule suivante est fautive.
+    Hard,
+    /// Points de suspension : une minuscule suivante est présumée continuation.
+    Ellipsis,
+}
 
 /// Abréviations fréquentes après lesquelles le point ne termine pas la phrase.
 /// Comparaison insensible à la casse.
@@ -43,8 +64,8 @@ impl Rule for CapitalizationAfterPeriod {
 
         // Index du dernier mot lexical vu avant la ponctuation courante.
         let mut last_word: Option<&Token> = None;
-        // Vrai si une ponctuation terminale est « en attente » d'un mot.
-        let mut terminal_pending = false;
+        // Terminateur « en attente » d'un mot (cf. [`Pending`]).
+        let mut pending = Pending::None;
         // Profondeur de parenthèses ouvertes : une ponctuation terminale à
         // l'intérieur d'une parenthèse (« (perte, vol, virus…) ») n'est pas une
         // fin de phrase — la phrase porteuse se poursuit après la parenthèse.
@@ -59,17 +80,27 @@ impl Rule for CapitalizationAfterPeriod {
                         ")" => paren_depth = paren_depth.saturating_sub(1),
                         _ => {}
                     }
-                    if paren_depth == 0 && TERMINAL_PUNCT.contains(&token.text.as_str()) {
-                        // Ne pas déclencher si le mot précédent est une
-                        // abréviation courante.
-                        let after_abbrev =
-                            last_word.map(|w| is_abbreviation(&w.text)).unwrap_or(false);
-                        terminal_pending = !after_abbrev;
+                    if paren_depth == 0 {
+                        if HARD_TERMINAL_PUNCT.contains(&token.text.as_str()) {
+                            // Ne pas déclencher si le mot précédent est une
+                            // abréviation courante.
+                            let after_abbrev =
+                                last_word.map(|w| is_abbreviation(&w.text)).unwrap_or(false);
+                            pending = if after_abbrev {
+                                Pending::None
+                            } else {
+                                Pending::Hard
+                            };
+                        } else if token.text == ELLIPSIS {
+                            pending = Pending::Ellipsis;
+                        }
                     }
                     // Toute autre ponctuation laisse l'état inchangé.
                 }
                 TokenKind::Word | TokenKind::Elision | TokenKind::Number => {
-                    if terminal_pending {
+                    // Seul un terminateur ferme impose une majuscule ; après des
+                    // points de suspension, une minuscule est une continuation.
+                    if pending == Pending::Hard {
                         if let Some(c) = first_char_is_lower(&token.text) {
                             let mut corrected = String::new();
                             corrected.extend(c.to_uppercase());
@@ -84,8 +115,8 @@ impl Rule for CapitalizationAfterPeriod {
                                 rule_id: RULE_ID,
                             });
                         }
-                        terminal_pending = false;
                     }
+                    pending = Pending::None;
                     last_word = Some(token);
                 }
             }
@@ -165,12 +196,26 @@ mod tests {
     }
 
     #[test]
-    fn test_ellipsis_outside_parentheses_still_triggers() {
-        // Hors parenthèse, « … » reste une fin de phrase.
-        let tokens = tokenize("il hésita… puis partit");
-        let suggestions = CapitalizationAfterPeriod.check(&tokens);
-        assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].replacements, vec!["Puis"]);
+    fn test_ellipsis_followed_by_lowercase_is_continuation() {
+        // « … » est un terminateur ambigu : suivi d'une minuscule, c'est une
+        // suspension intra-phrase (continuation), pas une nouvelle phrase. On
+        // n'exige donc pas de majuscule (précision > rappel).
+        for text in [
+            "il hésita… puis partit",
+            "j'ai des pommes, des poires… et des bananes",
+            "Bref… voici la suite",
+        ] {
+            let tokens = tokenize(text);
+            let suggestions = CapitalizationAfterPeriod.check(&tokens);
+            assert!(
+                suggestions.is_empty(),
+                "faux positif sur « {text} » : {:?}",
+                suggestions
+                    .iter()
+                    .map(|s| &s.replacements)
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

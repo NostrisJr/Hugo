@@ -1,27 +1,26 @@
 [PARTIEL — « barres » (#1c) RÉSOLU : `conjugation` consomme le POS et le verbe
 candidat doit être étiqueté VERB/AUX, donc l'homographe nom « barres » ne
-déclenche plus. RESTE : « sûre » (#1a, sur/sûr) et « il y a » (#1b) ne se
-reproduisent pas isolément — à rejouer sur le paragraphe complet.]
+déclenche plus. « sûre » (#1a, sur/sûr) RÉSOLU : `attribute` refuse un attribut
+candidat étiqueté ADP/DET/PRON… (`is_attribute_tag`), donc la préposition « sur »
+(« elle est sur le côté ») ne devient plus « sure ». RESTE : « il y a » (#1b) ne
+se reproduit pas isolément — à rejouer sur le paragraphe complet.]
 
-"Il va à pieds a Paris" -> Faux. devrait être "il va à pieds à Paris"
-"Celui qui va à pieds a beaucoup à apprendre" -> Vrai
-[RÉSOLU — tranche 1 a/à (rules::confusion) : la 1re phrase corrige « a » → « à »
-(NOM + a + NOM-propre), la 2e ne signale rien (« a » = avoir correct).]
+ERREURES INVISIBLES POUR LE CORRECTEUR:
+[PARTIEL — apposition détachée] “Au bord du lac, endormi à l’ombre des arbres, patientaient les enfants” → devrait être “endormis”. La règle `detached_appositive` (phase 12.2) gère maintenant ce motif. GAP RÉSIDUEL : “enfant” est un nom épicène (genre non enregistré dans le lexique) → le genre par défaut masculin est utilisé → correction “endormis” proposée si le CRF détecte bien “patientaient” comme verbe fini. Pour des noms à genre connu (soldats, voyageuses…), la règle fonctionne pleinement.
 
-le problème qui nous a été posé -> prend "nous" comme sujet, et non "le problème"
-[RÉSOLU (#3) — `conjugation` (POS) : un pronom précédé du relatif « qui » est un
-objet, pas le sujet → plus de faux accord sur « a ».]
-L’outil développé par Microsoft pour propulser la gestion des devices utilisateurs dans une nouvelle ère fut nommé Intune -> Accord de l'attribut : « nommé » ne s'accorde pas avec le sujet. Prends ère pour le sujet et non outil
-[RÉSOLU (#4) — `attribute` (POS) : en remontant vers le sujet, un nom introduit
-par une préposition (« dans une nouvelle ère ») est refusé comme sujet ; faute de
-sujet sûr dans la fenêtre, on s'abstient (précision > rappel).]
-la démultiplication des usages digitaux alla de paire avec l’intensification des risques -> prend "usages" pour le sujet de "aller" et non démultiplication
-[RÉSOLU (#5) — `conjugation` (POS) : « des »/« du » précédé d'un nom = complément
-de+les, pas un nouveau sujet → « des usages » n'est plus pris pour sujet.]
-la nécessité grandissante de pouvoir facilement redéployer des postes compromis -> Accord sujet–verbe : « compromis » ne s'accorde pas avec le sujet « postes ». ne le comprends pas comme un adjectif (participe passé adjectivé)
-[RÉSOLU (#6) — `conjugation` (POS) : un GN précédé d'un verbe (ici l'infinitif
-« redéployer ») est un COD, pas un sujet (la garde côté sujet supplée le CRF qui
-étiquette « compromis » VERB à tort).]
-un employé ayant, pour X raison (perte, vol, virus…) perdu son poste -> Veut mettre une majuscule à "poste", alors que la phrase n'est pas finie (l'énumération était entre parenthèses)
-[RÉSOLU (#7) — `capitalization` : suivi de la profondeur de parenthèses ; un
-« … » à l'intérieur d'une parenthèse ne ferme plus la phrase.]
+“Jeanne à si peu de temps devant elle. Le soir approche et elle à faim. Jeanne est pressé de retrouvé sa famille. “ -> la première erreur de à/a n’estpas attrappée, Jeanne ne semble pas être pris comme le sujet, n’est pas compris comme féminin (certes difficile pour les noms propres. peut-être inclure une liste de noms courants ?). “devant elle” est pris comme une inversion alors que ça ne devrait pas
+
+“Sera-il des nôtres ce soir ? Se dîner sera-il le notre ?” -> ne propose pas le t d’élition pour l’inversion “sera-t-il”. l’explication du pronom possessif est étrange. Le pronom possessif prend un accent circonflexe, et le fait qu’il y ait un article définit avant ou non ne change rien (si ce n’est qu’il n’est pas correct d’employer ce pronom possessif sans article). Et ne voit pas la différence ce/se
+[PARTIEL (t euphonique) — `trait_union` : (a) pour deux mots séparés « sera il » → « sera-t-il » ; (b) pour un token déjà lié « Sera-il » → « Sera-t-il » (verbe en voyelle + pronom en voyelle → insertion du *t*). Reste : explication du pronom possessif à améliorer (gap style).]
+
+Il lui dit : “Je ne pense pas que Marc puisses avoir raison” -> cela demande un trai d’union entre dit et Je, sans voir que : “ est un signe de début de nouvelle phrase. par ailleurs, toujours le soucis de Marc qui n’est pas pris comme le sujet, donc ça rate l’erreur d’accord
+[PARTIEL (faux positif trait d’union) — `trait_union` : une ponctuation ou guillemet entre le verbe et le pronom bloque la détection d’inversion → plus de suggestion erronée « dit-Je ». Reste : Marc non pris comme sujet (gap identification sujet).]
+
+“Qui’il se taises !” -> rate l’élision du i (qu’il) et l’accord de “taise”
+
+[PARTIEL — repli suffixe 1ᵉʳ groupe]
+"Nous implémentes la phase 12." → RÉSOLU : repli par suffixe détecte -es (2sg) ≠ nous (1pl) → « implémentons ».
+"Je conjugueriez avec facilité." → RÉSOLU : repli par suffixe détecte -eriez (2pl cond.) ≠ je (1sg) → « conjuguerais ».
+"Implémentes la phase 12." → RÉSOLU : `imperatif::ImperatifGroupe1` — règle positionnelle (tête de phrase, suffixe -es, infinitif connu du Lefff, pas de « tu »/verbe fini suivant, pas de virgule) ; indépendante du CRF et du sujet.
+
+

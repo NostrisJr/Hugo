@@ -30,9 +30,11 @@ pub struct Token {
 }
 
 impl Token {
-    /// Indique si le jeton est un mot ou une élision (porteur de sens lexical).
+    /// Indique si le jeton est un mot, une élision ou un nombre (porteur de
+    /// sens lexical). Les nombres sont inclus pour que « les 2 chats » soit
+    /// traité de la même façon que « les deux chats » dans les règles d'accord.
     pub fn is_lexical(&self) -> bool {
-        matches!(self.kind, TokenKind::Word | TokenKind::Elision)
+        matches!(self.kind, TokenKind::Word | TokenKind::Elision | TokenKind::Number)
     }
 }
 

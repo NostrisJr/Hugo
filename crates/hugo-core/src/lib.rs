@@ -20,6 +20,7 @@
 //! assert!(!suggestions.is_empty());
 //! ```
 
+pub mod clause;
 pub mod morpho;
 pub mod pos;
 pub mod rules;
@@ -84,6 +85,60 @@ pub struct Suggestion {
     pub rule_id: &'static str,
 }
 
+/// Métadonnées d'une règle : identifiant stable et nom lisible.
+///
+/// Produit par [`Checker::rule_catalog`] pour alimenter une interface
+/// d'activation/désactivation des règles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RuleInfo {
+    /// Identifiant stable de la règle (à passer à [`CheckOptions`]).
+    pub id: &'static str,
+    /// Nom lisible de la règle.
+    pub name: &'static str,
+}
+
+/// Options d'une vérification : ensemble des règles **désactivées**.
+///
+/// Par défaut, toutes les règles sont actives (ensemble vide). On désigne une
+/// règle par son `rule_id` (cf. [`Checker::rule_catalog`]). Choix d'une
+/// liste de *désactivation* (plutôt que d'activation) : une règle nouvellement
+/// ajoutée est active par défaut, sans rien casser côté hôte.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CheckOptions {
+    disabled: std::collections::HashSet<String>,
+}
+
+impl CheckOptions {
+    /// Options par défaut : toutes les règles actives.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Construit des options désactivant les règles dont l'identifiant est
+    /// fourni.
+    pub fn with_disabled<I, S>(rules: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            disabled: rules.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Désactive une règle (chaînable).
+    pub fn disable(mut self, rule_id: impl Into<String>) -> Self {
+        self.disabled.insert(rule_id.into());
+        self
+    }
+
+    /// Vrai si la règle d'identifiant `rule_id` est active.
+    pub fn is_enabled(&self, rule_id: &str) -> bool {
+        !self.disabled.contains(rule_id)
+    }
+}
+
 /// Point d'entrée principal du correcteur.
 ///
 /// Un `Checker` est immuable une fois construit et `Send + Sync` : il peut être
@@ -110,20 +165,38 @@ impl Checker {
     }
 
     /// Vérifie un texte et retourne les suggestions, triées par position.
+    ///
+    /// Toutes les règles (et le correcteur orthographique) sont actives. Pour
+    /// en désactiver certaines, voir [`Checker::check_with`].
     pub fn check(&self, text: &str) -> Vec<Suggestion> {
+        self.check_with(text, &CheckOptions::default())
+    }
+
+    /// Vérifie un texte en n'appliquant que les règles **activées** par
+    /// `options` (toutes par défaut). Les suggestions sont triées par position.
+    ///
+    /// Une règle est identifiée par son `rule_id` (cf. [`Checker::rule_catalog`]
+    /// pour la liste complète) ; le correcteur orthographique répond à
+    /// l'identifiant [`SPELLING_RULE_ID`]. Permet à une application hôte (plugin
+    /// Tauri…) de laisser l'utilisateur activer/désactiver chaque famille.
+    pub fn check_with(&self, text: &str, options: &CheckOptions) -> Vec<Suggestion> {
         let tokens = tokenizer::tokenize(text);
         // Désambiguïsation POS (CRF) : une étiquette unique par token, alignée
         // sur `tokens`. Calculée une seule fois et offerte à chaque règle.
         let tags = pos::tag(&tokens);
         let mut suggestions = Vec::new();
 
-        // Appliquer les règles grammaticales.
+        // Appliquer les règles grammaticales et typographiques activées.
         for rule in &self.rules {
-            suggestions.extend(rule.check_tagged(&tokens, &tags));
+            if options.is_enabled(rule.id()) {
+                suggestions.extend(rule.check_tagged(&tokens, &tags));
+            }
         }
 
-        // Appliquer le correcteur orthographique (Dicollecte).
-        suggestions.extend(self.spell_check(&tokens));
+        // Appliquer le correcteur orthographique (Dicollecte) s'il est activé.
+        if options.is_enabled(SPELLING_RULE_ID) {
+            suggestions.extend(self.spell_check(&tokens));
+        }
 
         // Trier par position de départ, puis par identifiant de règle pour un
         // ordre stable et reproductible.
@@ -134,6 +207,24 @@ impl Checker {
                 .then_with(|| a.rule_id.cmp(b.rule_id))
         });
         suggestions
+    }
+
+    /// Catalogue de toutes les règles disponibles (identifiant + nom lisible),
+    /// correcteur orthographique inclus. Destiné aux interfaces qui proposent
+    /// d'activer/désactiver chaque règle (cf. [`CheckOptions`]).
+    pub fn rule_catalog() -> Vec<RuleInfo> {
+        let mut catalog: Vec<RuleInfo> = rules::all_rules()
+            .iter()
+            .map(|r| RuleInfo {
+                id: r.id(),
+                name: r.name(),
+            })
+            .collect();
+        catalog.push(RuleInfo {
+            id: SPELLING_RULE_ID,
+            name: "Orthographe",
+        });
+        catalog
     }
 
     /// Étiquette morphosyntaxiquement un texte (désambiguïsation POS par CRF).
@@ -223,5 +314,33 @@ mod tests {
         assert_eq!(s.len(), 3);
         assert!(!s.is_empty());
         assert!(Span::new(4, 4).is_empty());
+    }
+
+    #[test]
+    fn disabling_a_rule_suppresses_its_suggestions() {
+        let checker = Checker::new();
+        let options = CheckOptions::new().disable("duplicate_word");
+        let suggestions = checker.check_with("il il mange", &options);
+        assert!(suggestions.iter().all(|s| s.rule_id != "duplicate_word"));
+    }
+
+    #[test]
+    fn disabling_spelling_suppresses_unknown_words() {
+        let checker = Checker::new();
+        let options = CheckOptions::with_disabled([SPELLING_RULE_ID]);
+        let suggestions = checker.check_with("xyzqwk", &options);
+        assert!(suggestions.iter().all(|s| s.rule_id != SPELLING_RULE_ID));
+    }
+
+    #[test]
+    fn rule_catalog_lists_known_rules() {
+        let catalog = Checker::rule_catalog();
+        assert!(catalog.iter().any(|r| r.id == SPELLING_RULE_ID));
+        // Pas de doublon d'identifiant.
+        let mut ids: Vec<&str> = catalog.iter().map(|r| r.id).collect();
+        let n = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), n);
     }
 }

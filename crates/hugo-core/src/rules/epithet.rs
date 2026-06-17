@@ -15,8 +15,8 @@
 //!   un mauvais genre quand Lexique laisse le nom épicène) ;
 //! - la forme corrigée est engendrée par [`morpho::decline`].
 
-use super::{lexical_sentences, Rule};
-use crate::morpho::{self, Gender, MorphCategory, Number};
+use super::{is_number_invariable, lexical_sentences, Rule};
+use crate::morpho::{self, Gender, Morph, MorphCategory, Number};
 use crate::pos::{Tagged, Upos};
 use crate::tokenizer::Token;
 use crate::Suggestion;
@@ -45,6 +45,58 @@ fn is_noun(token: &Token) -> bool {
     morpho::lookup(&token.text)
         .iter()
         .any(|m| m.category == MorphCategory::Noun)
+}
+
+/// Vrai si le jeton n'admet **que** des analyses adjectif/déterminant (pas de
+/// lecture nominale) : un prémodifieur que l'on peut sauter pour atteindre la
+/// tête nominale d'un complément (« marge nette **d'**intérêts » → « marge »).
+fn is_modifier_only(token: &Token) -> bool {
+    let cats: Vec<_> = morpho::lookup(&token.text)
+        .into_iter()
+        .map(|m| m.category)
+        .collect();
+    !cats.is_empty()
+        && cats
+            .iter()
+            .all(|c| matches!(c, MorphCategory::Adjective | MorphCategory::Determiner))
+}
+
+/// Minuscules + apostrophe finale ôtée (« d' » → « d »).
+fn normalize(text: &str) -> String {
+    text.to_lowercase()
+        .trim_end_matches(['\'', '\u{2019}'])
+        .to_string()
+}
+
+/// Prépositions « de » introduisant un complément du nom (« outils **de**
+/// travail », « sac **du** voisin »).
+fn is_de(text: &str) -> bool {
+    matches!(normalize(text).as_str(), "de" | "d" | "du" | "des")
+}
+
+/// Genre (s'il est sûr) et nombre du nom à l'index lexical `h`, ou `None` si le
+/// nombre est indéterminé.
+fn noun_features(lex: &[(usize, &Token)], h: usize) -> Option<(Option<Gender>, Number)> {
+    let nouns: Vec<_> = morpho::lookup(&lex[h].1.text)
+        .into_iter()
+        .filter(|m| m.category == MorphCategory::Noun)
+        .collect();
+    let number = consensus(nouns.iter().map(|m| m.number))?;
+    let gender = consensus(nouns.iter().map(|m| m.gender)).filter(|g| *g != Gender::Epicene);
+    Some((gender, number))
+}
+
+/// Vrai si l'une des analyses adjectivales s'accorde avec (`gender`, `number`).
+/// Le genre n'est contraint que s'il est connu.
+fn adj_agrees(adjectives: &[Morph], gender: Option<Gender>, number: Number) -> bool {
+    adjectives.iter().any(|m| {
+        m.number
+            .map_or(true, |n| n == number || n == Number::Invariable)
+            && match gender {
+                Some(g) => m.gender.map_or(true, |mg| mg == g || mg == Gender::Epicene),
+                None => true,
+            }
+    })
 }
 
 /// Vrai si le jeton admet une analyse verbale finie (forme conjuguée).
@@ -111,22 +163,86 @@ impl EpithetAdjectiveAgreement {
 
                 // Nom tête adjacent : antéposé (nom suivant) ou postposé (nom
                 // précédent), dans cet ordre de priorité.
-                let noun_token =
+                // Cas particulier : PRÉDET + DET + NOM (ex. « tous les matins »,
+                // « aucune des erreurs »). Le prédet s'accorde avec le NOM, non
+                // avec un nom précédent. On restreint au jeu fermé de prédet.
+                const PREDETERMINERS: &[&str] =
+                    &["tout", "toute", "tous", "toutes", "aucun", "aucune", "nul", "nulle",
+                      "chaque", "quelque", "quelques", "certain", "certaine", "certains",
+                      "certaines", "plusieurs", "même", "mêmes", "autre", "autres"];
+                let noun_pos =
                     if a + 1 < lex.len() && is_noun(lex[a + 1].1) && noun_ok(lex[a + 1].0) {
-                        lex[a + 1].1
+                        a + 1
+                    } else if PREDETERMINERS.contains(&adj_token.text.to_lowercase().as_str())
+                        && a + 2 < lex.len()
+                        && morpho::lookup(&lex[a + 1].1.text)
+                            .iter()
+                            .any(|m| m.category == MorphCategory::Determiner)
+                        && is_noun(lex[a + 2].1)
+                        && noun_ok(lex[a + 2].0)
+                    {
+                        a + 2
                     } else if a > 0 && is_noun(lex[a - 1].1) && noun_ok(lex[a - 1].0) {
-                        lex[a - 1].1
+                        a - 1
                     } else {
                         continue;
                     };
+                let noun_token = lex[noun_pos].1;
+
+                // Rattachement ambigu « N1 (de Nᵢ)+ ADJ » : un adjectif
+                // **postposé** peut s'accorder avec **n'importe quelle** tête
+                // nominale en remontant la **chaîne** de compléments « de N »
+                // (« outils de travail de nuit professionnels » accorde
+                // « professionnels » avec « outils », par-delà « travail » et
+                // « nuit »). S'il s'accorde avec l'une d'elles, on s'abstient — ni
+                // le lexique ni le CRF ne tranchent le rattachement (précision >
+                // rappel).
+                if noun_pos + 1 == a {
+                    let mut n = noun_pos;
+                    let mut agrees_head = false;
+                    // Tant qu'on est précédé d'un « de » : la tête du complément
+                    // peut porter ses propres prémodifieurs (« marge nette d'… »),
+                    // que l'on saute pour atteindre le nom (déterminants/adjectifs).
+                    while n >= 2 && is_de(&lex[n - 1].1.text) {
+                        let mut h = n - 2;
+                        while h > 0 && !is_noun(lex[h].1) && is_modifier_only(lex[h].1) {
+                            h -= 1;
+                        }
+                        if !(is_noun(lex[h].1) && noun_ok(lex[h].0)) {
+                            break;
+                        }
+                        if let Some((g1, num1)) = noun_features(&lex, h) {
+                            if adj_agrees(&adjectives, g1, num1) {
+                                agrees_head = true;
+                                break;
+                            }
+                        }
+                        n = h;
+                    }
+                    if agrees_head {
+                        continue;
+                    }
+                }
 
                 let nouns: Vec<_> = morpho::lookup(&noun_token.text)
                     .into_iter()
                     .filter(|m| m.category == MorphCategory::Noun)
                     .collect();
                 let noun_gender = consensus(nouns.iter().map(|m| m.gender));
-                let Some(number) = consensus(nouns.iter().map(|m| m.number)) else {
-                    continue; // nombre du nom indéterminé → on s'abstient
+                // Nom **invariable en nombre** (« fois », « fils », « prix ») : sa
+                // forme vaut singulier comme pluriel. On ne corrige donc pas le
+                // nombre de l'adjectif — on garde le sien (« la première fois »,
+                // « un autre fils » sont corrects) ; seul le genre est vérifié.
+                let number = if is_number_invariable(&nouns) {
+                    match consensus(adjectives.iter().map(|m| m.number)) {
+                        Some(n) => n,
+                        None => continue, // nombre de l'adjectif ambigu → abstention
+                    }
+                } else {
+                    match consensus(nouns.iter().map(|m| m.number)) {
+                        Some(n) => n,
+                        None => continue, // nombre du nom indéterminé → on s'abstient
+                    }
                 };
 
                 // Genre cible : celui du nom s'il est connu, sinon on préserve
@@ -299,7 +415,34 @@ mod tests {
             0
         );
         // Adjectif verbal mal accordé (tagué ADJ) : toujours corrigé.
-        assert_eq!(first_tagged("les voyages fatigant").as_deref(), Some("fatigants"));
+        assert_eq!(
+            first_tagged("les voyages fatigant").as_deref(),
+            Some("fatigants")
+        );
+    }
+
+    #[test]
+    fn de_complement_attachment_is_ambiguous() {
+        // « N1 de N2 ADJ » : l'adjectif postposé peut s'accorder avec la tête
+        // N1 (« outils ») par-delà le complément « de N2 » (« travail »). Comme
+        // « professionnels » (pluriel) s'accorde avec « outils » (pluriel), on
+        // s'abstient au lieu de le « corriger » vers « travail » (singulier).
+        assert_eq!(count_tagged("des outils de travail professionnels"), 0);
+        assert_eq!(count_tagged("les moyens de transport publics"), 0);
+        assert_eq!(count_tagged("une salle de jeux spacieuse"), 0);
+        // Chaîne de compléments « de N de N » : l'accord avec la tête lointaine
+        // « outils » (par-delà « travail » puis « nuit ») suffit à s'abstenir.
+        assert_eq!(
+            count_tagged("les outils de travail de nuit professionnels"),
+            0
+        );
+        // Le complément ne masque pas un vrai désaccord avec le nom proche :
+        // « verte » ne s'accorde ni avec « sac » (m. sg.) ni avec « pommes »
+        // → corrigé vers le nom tête adjacent « pommes ».
+        assert_eq!(
+            first_tagged("un sac de pommes verte").as_deref(),
+            Some("vertes")
+        );
     }
 
     #[test]

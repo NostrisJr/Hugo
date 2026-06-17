@@ -307,10 +307,22 @@
           "markdownDescription": "Denies the check_text command without any pre-configured scope."
         },
         {
-          "description": "Permissions par défaut du plugin Hugo : autorise la vérification de texte.\n#### This default permission set includes:\n\n- `allow-check-text`",
+          "description": "Enables the list_rules command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-rules",
+          "markdownDescription": "Enables the list_rules command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the list_rules command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-list-rules",
+          "markdownDescription": "Denies the list_rules command without any pre-configured scope."
+        },
+        {
+          "description": "Permissions par défaut du plugin Hugo : autorise la vérification de texte et la liste des règles.\n#### This default permission set includes:\n\n- `allow-check-text`\n- `allow-list-rules`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Permissions par défaut du plugin Hugo : autorise la vérification de texte.\n#### This default permission set includes:\n\n- `allow-check-text`"
+          "markdownDescription": "Permissions par défaut du plugin Hugo : autorise la vérification de texte et la liste des règles.\n#### This default permission set includes:\n\n- `allow-check-text`\n- `allow-list-rules`"
         }
       ]
     }

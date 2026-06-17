@@ -342,8 +342,43 @@ format, pas le contenu).
     **peu→peut/peux** (sujet + « peu » + infinitif, forme selon la personne) ;
     **peut/peux→peu** (quantifieur précédent, ou *avoir* + … + « de »). La
     confusion de **personne** peux↔peut est laissée à l'accord sujet–verbe.
-- [ ] Tranche 4 — quel(s)/quelle(s)/qu'elle(s), quand/quant/qu'en, sans/s'en/c'en
-- [ ] Tranche 5 — terminaisons homophones (-er/-é/-ez, -ai/-ais/-ait)
+- [x] **Tranche 4 — quel(s)/quelle(s)/qu'elle(s), quand/quant, sans/s'en** (une
+  famille par module dans `rules::confusion`, chacune consommant le POS et livrée
+  avec son corpus reconstitué) :
+  - **quel/qu'elle** (`quel_quelle::QuelConfusion`, [`corpus/confusion-quel-quelle.md`](corpus/confusion-quel-quelle.md)) :
+    **qu'elle(s)→quel(le)(s)** (« qu'elle heure » → « quelle », fusion des deux
+    jetons, accord avec le nom/adjectif qui suit — un pronom n'est jamais suivi
+    d'un groupe nominal) ; **quelle(s)→qu'elle(s)** (forme féminine + verbe
+    conjugué non *être*/*avoir*, clitiques sautés). Comme à la Grammalecte, la tête
+    nominale est reconnue par les **lectures du lexique** (le CRF étiquette « heure »
+    verbe sous l'effet de l'erreur). Gaps : « quelle est/a été… » (ambiguïté
+    **structurelle** interrogatif ↔ subordonnée) ; masculin « quel→qu'il » (autre
+
+quand_quant::QuandConfusion`, [`corpus/confusion-quand-quant.md`](corpus/confusion-quand-quant.md)) :
+    **quand→quant** (« quand à/au/aux » → « quant », virgule intercalée exclue) et
+    **quant→quand** (« quant » non suivi de « à/au/aux », son seul emploi licite).
+    Gap : **qu'en** (« qu'en penses-tu » ↔ « quand penses-tu »), pas de signal
+    séparable — « quant » fautif est toujours rendu « quand ».
+  - **sans/s'en** (`sans_sen::SansConfusion`, [`corpus/confusion-sans-sen.md`](corpus/confusion-sans-sen.md)) :
+    **sans→s'en** (sujet 3ᵉ pers. + « sans » + verbe conjugué, « ne » sauté — la
+    préposition ne s'insère pas là) ; **s'en→sans** (« s' » + « en » + tête nominale,
+    fusion des deux jetons ; lectures du lexique pour écarter les homographes
+    nom/verbe « s'en aller »). Gaps : **c'en** (« c'en est trop », trop rare) ;
+    nom homographe d'un verbe après « s'en » (précision > rappel).
+- [x] **Tranche 5 — terminaisons homophones -er/-é/-ez** (`terminaisons::TerminaisonsConfusion`,
+  [`corpus/confusion-terminaisons.md`](corpus/confusion-terminaisons.md)) : pour un
+  verbe du 1ᵉʳ groupe, infinitif (« manger »), participe masc. sg. (« mangé ») et
+  2ᵉ pers. pl. (« mangez ») sont homophones (/e/). On tranche par le **gouverneur**
+  (clitiques/adverbes/« ne » sautés) : **-é** après auxiliaire `avoir`/`être`
+  (accord avec le sujet pour `être`) ; **-er** après préposition infinitive
+  (`à/de/pour/sans`, garde sur « rien **de** changé ») ou semi-auxiliaire conjugué
+  (liste [`SEMI_MODALS`]) ; **-ez** après un « vous » sujet en tête de proposition.
+  Les homographes (nom « fer/clé/nez/côté », participes des 2ᵉ/3ᵉ groupes
+  « parti/fait ») sont écartés par les lectures du lexique (lemme en `-er` exigé).
+  Gaps assumés : **-ai/-ais** (futur ↔ conditionnel, ambiguïté **sémantique**) ;
+  **-ais/-ait** (personne — déjà couvert par l'accord sujet–verbe) ; « vous » sujet
+  hors tête de proposition ; accord du participe avec COD antéposé (laissé à
+  `past_participle`).
 - [x] **Robustesse de l'identification du sujet (consommation du POS)** —
   *chantier prioritaire* regroupant une famille de **faux positifs** où un
   complément voisin est pris pour le sujet (ou un nom homographe pour un verbe).
@@ -383,22 +418,296 @@ format, pas le contenu).
   `is_governed_left` côté attribut) et **corpus de non-régression** dans
   `tests/grammar.rs`. Les 6 symptômes ci-dessus sont neutralisés. A débloqué
   l'item « Suivi » de la phase 4.
-- [ ] **Capitalisation : « … » non terminal** — « (perte, vol, virus…) perdu »
-  réclame à tort une majuscule sur « perdu » : les points de suspension dans une
-  parenthèse (et, plus largement, suivis d'une minuscule) ne ferment pas la
-  phrase. Correctif côté tokenizer/`capitalization` (suivi de la profondeur de
-  parenthèses + heuristique de continuation). *Item adjacent, hors du chantier
+- [x] **Capitalisation : « … » non terminal** — « (perte, vol, virus…) perdu »
+  réclamait à tort une majuscule. **Réglé** dans `capitalization` : (a) suivi de
+  la **profondeur de parenthèses** — une ponctuation terminale dans une
+  parenthèse ne ferme pas la phrase porteuse ; (b) **heuristique de continuation**
+  — les points de suspension sont un terminateur **ambigu** (`Pending::Ellipsis`),
+  distinct des terminateurs fermes `.`/`!`/`?` (`Pending::Hard`) : suivis d'une
+  minuscule, ils signalent une suspension intra-phrase (« il hésita… puis
+  partit ») et n'imposent pas de majuscule (précision > rappel). Corpus de
+  non-régression dans `capitalization`. *Item adjacent, hors du chantier
   « identification du sujet ».*
-- [ ] **sur / sûr** — « sur le côté » → suggestion erronée « sûre » (la
+- [x] **sur / sûr** — « elle est sur le côté » → suggestion erronée « sure » (la
   préposition « sur », aussi adjectif « sur » = acide au lexique, traitée comme
-  attribut à accorder). Non reproduit isolément ; à rejouer sur le paragraphe
-  complet, vraisemblablement réglé par la même garde POS (n'accorder qu'un
-  attribut étiqueté `ADJ`). *Item adjacent.*
+  attribut à accorder). **Réglé** par une garde POS côté **attribut** dans
+  `attribute` (`is_attribute_tag`) : on refuse un attribut candidat étiqueté
+  `ADP`/`DET`/`PRON`/… par le CRF. Les attributs réels, même mal étiquetés `VERB`
+  (« content », « parti », « allé »), restent acceptés ; corpus de non-régression
+  dans `attribute` (`pos_path_preposition_attribute_is_ignored`) et `tests/grammar.rs`.
 
 **Sources d'inspiration du corpus** (toujours reformulées, jamais copiées) :
 Projet Voltaire, Question Orthographe, Banque de dépannage linguistique,
 listes de difficultés du français. Les cas de Grammalecte/LT servent de
 **checklist de phénomènes** uniquement.
+
+---
+
+## Cartographie Grammalecte → écarts de Hugo
+
+> Lecture des familles de règles exposées par Grammalecte (`gc_lang/fr`,
+> options de la barre de configuration) et état de couverture côté Hugo. Sert
+> de boussole pour les phases 7+. Rappel méthodologique : on réutilise la
+> **carte des phénomènes** (faits du français, non protégeables), jamais le
+> code, les listes curées ni les phrases `TEST:` de Grammalecte.
+
+| Famille Grammalecte | Couverture Hugo | Reste à faire |
+|---|---|---|
+| **Conjugaison** (accord sujet–verbe) | ✅ `conjugation` | sujets `qui` relatif, clivées « c'est … qui/que », « la plupart/beaucoup de » + verbe |
+| **Accords GN** (det/adj/nom) | ✅ `agreement`, `epithet`, `attribute` | numéraux (vingt/cent), demi/nu/mi, adj. verbal vs participe présent, couleurs composées, correction conjointe det+adj |
+| **Accords sujets coordonnés** (genre mixte) | ✅ `attribute` phase 12-préparation | adjectif détaché + sujet postposé (phase 12) |
+| **Participe passé** (être/avoir/pronominal) | ✅ (3 règles) | COD antéposé au-delà de *les/la*, « en » partitif |
+| **Subjonctif** | 🟡 `subjunctive` | conjonctions ambiguës, concordance des temps |
+| **Confusions / homophones** | 🟡 13 familles (phase 6 + `homophones`) | et/est, ces/ses, ni/n'y, si/s'y, sa/ça, ma/m'a, dans/d'en, près/prêt, plutôt, du/dû, notre/nôtre, dont/donc, etc. (phase 9) |
+| **Confusions fin de verbe** (-er/-é/-ez) | ✅ `terminaisons` | -ai/-ais (sémantique), assumé |
+| **Élisions** | ❌ | le/ce/si/que + voyelle, jusqu', lorsqu'… (phase 8) |
+| **Typographie** (apostrophe, guillemets, tirets, …) | 🟡 `typography` (apostrophe, suspension, doublons, guillemets, ligatures) | tirets (incise/dialogue), signes (`×`, `©`) |
+| **Espaces** (insécables, surnuméraires, manquants) | 🟡 `typography` (`typo_space`, `typo_nbsp`) | insertion d'insécables manquantes, espace après `. ! ? :` |
+| **Nombres** (séparateurs, ordinaux, romains) | 🟡 `typography` (`typo_ordinal`) | séparateur de milliers, romains, `%`/`°`/`€` |
+| **Majuscules** | 🟡 `capitalization` (début de phrase) | sigles, après deux-points, gentilés |
+| **Traits d'union et soudures** | ❌ | nombres composés, impératif + pronom, inversions (phase 8/10) |
+| **Pléonasmes** | ❌ | phase 11 |
+| **Négations** (« ne » manquant) | ❌ | phase 11 (registre) |
+| **Style** (répétitions, anglicismes, lourdeurs) | ❌ | phase 11, optionnel/désactivable |
+
+---
+
+### Phase 7 — Typographie, ponctuation, espaces, nombres
+
+**Objectif** : reproduire le module le plus utilisé de Grammalecte — entièrement
+**déterministe**, sans CRF ni morphologie, à très haute précision. Travaille sur
+les tokens et le texte brut ; chaque sous-règle est **activable/désactivable**
+(les conventions typographiques varient selon les contextes).
+
+> **État (phase 7 — cœur livré)** : module `rules::typography`, 8 règles
+> déterministes (`typo_*`), 34 tests unitaires + corpus `corpus/typo-*.md`.
+> Elles n'opèrent que sur les jetons d'**espace**/**ponctuation**/**nombre** —
+> ignorés par les règles grammaticales — donc sans interférence. Restent en
+> attente (signalés ci-dessous) tirets, signes, milliers et romains.
+>
+> **Activation/désactivation** (demande explicite, transverse à toutes les
+> règles, pas seulement la typo) : le `Checker` reste **immuable et partagé** ;
+> on filtre **par appel** via [`CheckOptions`] (liste de `rule_id` désactivés,
+> défaut = tout actif) passée à `Checker::check_with`. `Checker::rule_catalog()`
+> fournit `(id, nom)` de **toutes** les règles (orthographe incluse) pour
+> alimenter une UI. Côté plugin Tauri : `check_text` accepte `disabledRules` et
+> la commande `list_rules` expose le catalogue.
+
+- [x] **Apostrophe typographique** (`typo_apostrophe`) : `'` droite → `'`
+      (U+2019) en position d'élision (`l'`, `qu'`…) et apostrophe interne
+      (`aujourd'hui`). Garde : lettre des deux côtés (épargne `5'`, guillemet
+      simple).
+- [x] **Points de suspension** (`typo_ellipsis`) : `...` (3+ points contigus)
+      → `…`. `..` laissé au doublon.
+- [x] **Espaces insécables** (`typo_nbsp`) : **conversion** d'une espace
+      ordinaire existante en fine insécable avant `;` `!` `?`, insécable avant
+      `:` `»` et après `«`. On n'**insère** pas une espace absente (garde URL
+      `http://`, heures `12:30`, code).
+- [x] **Espaces surnuméraires** (`typo_space`) : doubles espaces, espace avant
+      `,` `.` `)`, espace après `(`.
+- [~] **Espaces manquants** (`typo_space`) : après `,` `;` (garde sur les
+      décimales `3,14`). `: . ! ?` **non traités** (homographes URL/abréviation,
+      précision > rappel).
+- [x] **Guillemets** (`typo_quotes`) : paire `"…"` → `« … »` (avec insécables,
+      espaces intérieures absorbées). Gaps : imbriqués `“ ”`, guillemet isolé.
+- [ ] **Tirets** : tiret d'incise `—` (cadratin) / `–` (demi-cadratin) vs trait
+      d'union `-` ; tiret de dialogue en début de ligne. *(différé)*
+- [x] **Ligatures** (`typo_ligature`) : `coeur` → `cœur`, `oeuf` → `œuf`… via
+      **liste curée** (garde par construction sur `coexister`, `moelle`,
+      `goéland`…) ; casse respectée (`CŒUR`). Gaps : `æ`, composés à trait
+      d'union.
+- [x] **Doublons de ponctuation** (`typo_punct_doubling`) : `!!`, `??`, `,,`,
+      `;;`, `..` → simple (garde sur `!?`, `?!` ; `…` exclu).
+- [~] **Nombres** (`typo_ordinal`) : ordinaux mal formés `1ère`→`1re`,
+      `2ème`/`2ième`→`2e`, pluriels (`2es`) ; `2nd(e)` admis. **Différés** :
+      séparateur de milliers, nombres romains, `%`/`°`/`€`.
+- [ ] **Signes** : `x` → `×`, `(c)` → `©`, `n°` → `№` (optionnel). *(différé)*
+- [x] **Corpus** : `corpus/typo-*.md` (apostrophe, ponctuation, espaces,
+      guillemets, ligatures, nombres) — cas correct/incorrect/correction et
+      **cas de non-déclenchement** (URLs, code, décimales).
+
+---
+
+### Phase 8 — Élisions et contractions obligatoires
+
+**Objectif** : règles morphologiques déterministes manquantes, à fort rappel
+(Grammalecte les classe « élisions »). S'appuie sur `morpho` (mot suivant
+commence par une voyelle ou un *h* muet) + une **liste curée originale des *h*
+aspirés** (héros, hibou, haricot, hêtre… → pas d'élision).
+
+> **État (phase 8 — livrée)** : module [`rules::elision`] (`ElisionRule`,
+> id `elision`). Détecte les élisions manquantes (`le arbre` → `l'arbre`,
+> `de eau` → `d'eau`, `je ai` → `j'ai`, `si il` → `s'il`, `que il` → `qu'il`,
+> `ce arbre` → `cet arbre`, `lorsque il` → `lorsqu'il`…) et les élisions
+> fautives devant h aspiré (`l'héros` → `le héros`). Liste [`H_ASPIRES`]
+> originale (≈ 60 lemmes). Corpus : [`corpus/elision.md`].
+
+- [x] **Article/pronom + voyelle** : `le arbre` → `l'arbre`, `la école` →
+      `l'école`, `je ai` → `j'ai`, `me a` → `m'a`, `te a`, `se est`, `ne est` →
+      `n'est`, `de eau` → `d'eau`.
+- [x] **ce → cet** devant voyelle/h muet : `ce arbre` → `cet arbre`, `ce homme`
+      → `cet homme` ; garde *h* aspiré (`ce héros` reste `ce`).
+- [x] **si + il/ils → s'il/s'ils** (jamais devant elle : `si elle` reste `si`).
+- [x] **que → qu'** : `que il` → `qu'il`, `que elle`, `que on`, `que un`.
+- [x] **Conjonctions** : `lorsque/puisque/quoique + il/elle/on/un/en` → `lorsqu'`,
+      `puisqu'`, `quoiqu'`.
+- [x] **Élision fautive inverse** : `l'héros` → `le héros` (h aspiré).
+- [x] **Corpus** : [`corpus/elision.md`] + liste [`H_ASPIRES`] intégrée.
+- [ ] *Gaps assumés* : `jusque → jusqu'`, `presque → presqu'île` (très ponctuels),
+      `s'elle → si elle` (rare).
+
+---
+
+### Phase 9 — Confusions et homophones restants
+
+**Objectif** : compléter la longue traîne des confusions de Grammalecte, sur le
+modèle des tranches 1–5 (une famille = un module `rules::confusion`, consomme le
+POS, livré avec son corpus). **Précision > rappel** : on ne traite que les
+directions à signal séparable, on documente les gaps structurels.
+
+> **État (phase 9 — livrée)** : 7 nouveaux modules de confusion livrés avec
+> leurs corpus. Gaps structurels documentés.
+
+- [x] **et/est** (`confusion::et_est`, [`corpus/confusion-et-est.md`]) :
+      sujet singulier 3ᵉ pers. + `et` + attribut/PP → `est`.
+- [ ] **ces/ses** : **gap structurel** assumé (deux déterminants valides, signal non séparable).
+- [x] **ni/n'y**, **si/s'y** (`confusion::ni_ny`, [`corpus/confusion-ni-ny.md`]) :
+      pronom sujet + `ni/si` + verbe conjugué → `n'y`/`s'y`/`m'y`/`t'y`.
+- [x] **sa/ça**, **ma/m'a**, **ta/t'a** (`confusion::sa_ca`, [`corpus/confusion-sa-ca.md`]).
+- [x] **dans/d'en** (`confusion::dans_den`, [`corpus/confusion-dans-den.md`]) :
+      `dans` + infinitif → `d'en`.
+- [x] **près/prêt** (`confusion::pres_pret`, [`corpus/confusion-pres-pret.md`]) :
+      copule + `près` + `à` + infinitif → `prêt(e/s)`.
+- [x] **plutôt/plus tôt**, **d'avantage/davantage** (`confusion::plutot`,
+      [`corpus/confusion-plutot.md`]).
+- [x] **du/dû**, **sur/sûr**, **notre/nôtre**, **votre/vôtre**, **mur/mûr**
+      (`confusion::accents`, [`corpus/confusion-accents.md`]).
+- [ ] *Gaps assumés* : **ces/ses**, **quelque/quel que**, **quoique/quoi que**,
+      **parce que/par ce que**, **tant/temps/t'en**, **dont/donc**, **peut-être/peut être**,
+      **différent/différend**, **censé/sensé**, **voie/voix** — signal non séparable
+      ou nécessitant une analyse sémantique. Documentés pour phase 11.
+
+---
+
+### Phase 10 — Accords avancés et traits d'union
+
+**Objectif** : refermer les écarts d'accord notés en phases 4/6 et couvrir les
+accords numéraux/composés de Grammalecte.
+
+> **État (phase 10 — livrée)** : 5 nouveaux modules livrés avec leurs corpus.
+> Gaps couleurs composées et correction conjointe det+adj documentés.
+
+- [x] **Numéraux** (`rules::numeraux`, [`corpus/accord-avance-numeraux.md`]) :
+      `quatre-vingts-un` → `quatre-vingt-un` (composé) ; `deux cent euros` →
+      `deux cents` (fin de numéral) ; `deux cents trois` → `deux cent` (avant unité).
+- [x] **demi/nu/mi/semi** invariables antéposés (`rules::demi`,
+      [`corpus/accord-avance-demi.md`]) : `une demie-heure` → `demi-heure` ;
+      `nue-pieds` → `nu-pieds`.
+- [x] **Adjectif verbal vs participe présent** (`rules::adjectif_verbal`,
+      [`corpus/accord-avance-adjectif-verbal.md`]) : `fatiguant`/`fatigant`,
+      `négligeant`/`négligent`, `provoquant`/`provocant`, `convainquant`/`convaincant`…
+      (9 paires). Tranché par la copule (attribut → forme adjectivale) et par le
+      gérondif `en` (participe présent → forme verbale).
+- [ ] **Couleurs composées** (gap phase 4) : `des robes bleu ciel` (invariable) —
+      pattern deux-mots difficile à distinguer des épithètes normales. Différé phase 11.
+- [ ] **Correction conjointe det+adj** (gap phase 4) : `une grande maisons` →
+      `de grandes maisons` — nécessite coordination entre deux règles (agreement +
+      epithet). Différé phase 11.
+- [x] **Accords par locution** (`rules::locutions`, [`corpus/accord-avance-locutions.md`]) :
+      `la plupart/beaucoup/peu des N` + verbe singulier → pluriel ;
+      `des plus/moins + adj singulier` → pluriel.
+- [x] **Traits d'union impératif/inversion** (`rules::trait_union`,
+      [`corpus/accord-avance-trait-union.md`]) : `donne moi` → `donne-moi`,
+      `est ce que` → `est-ce que`, `dit il` → `dit-il`, `vas y` → `vas-y`.
+
+---
+
+### Phase 12 — Structure syntaxique et accords avec sujet postposé
+
+**Objectif** : détecter les constructions où le **sujet est postposé** (inversion
+stylistique) et accorder correctement les adjectifs détachés qui s'y rapportent.
+Pré-requis : représentation des **propositions** (limites de clause) dans le pipeline.
+
+#### 12.1 — Structure de propositions (`crates/hugo-core/src/clause.rs`)
+
+> **État (phase 12.1 — livrée)** : module `clause` avec `Clause { start, end,
+> verb_pos, subject_pos, inverted }` et `segment_clauses(tokens, tags) ->
+> Vec<Clause>`. Détection O(n) par ponctuation + CRF. Inversion détectée via
+> `find_subject_before` / `find_subject_after`. 4 tests unitaires verts.
+
+- [x] `Clause` : struct { verb_pos, subject_pos: Option<usize>, start, end, inverted: bool }
+- [x] `segment_clauses(tokens, tags) -> Vec<Clause>` : détection par ponctuation +
+      CRF (VERB/AUX avec pronom sujet ou sujet nominal)
+- [x] Inversion détectée quand le nom sujet est **après** le verbe fini
+- [x] Tests unitaires sur phrases simples, inversées, multi-virgules
+
+#### 12.2 — Accord de l'adjectif apposé avec sujet postposé
+
+> **État (phase 12.2 — livrée)** : règle `rules::detached_appositive` (id
+> `detached_appositive`). Deux motifs couverts : (1) apposé **entre deux
+> virgules** puis verbe + sujet postposé ; (2) apposé **en tête de phrase**
+> (avant la première virgule) puis verbe + sujet postposé. Accord via
+> `morpho::decline` (adj) / `morpho::participle` (PP). 9 tests unitaires verts.
+> Corpus : [`corpus/accord-appose-postpose.md`](corpus/accord-appose-postpose.md).
+> Genre inconnu (épicènes) → masculin grammatical par défaut.
+
+- [x] Nouvelle règle `rules::detached_appositive`
+- [x] Détection du motif (deux variantes : enclosed + sentence-initial)
+- [x] Accord en genre et nombre via `morpho::decline` / `morpho::participle`
+- [x] Corpus : `corpus/accord-appose-postpose.md` (cas corrects, fautifs, non-déclenchement)
+- [x] Garde anti-faux-positif : si le sujet est ambigu ou absent, ne rien émettre
+
+#### 12.3 — Architecture de rendu asynchrone par priorité
+
+> *Motivation* : les règles de la phase 12 (analyse de clause, adjectifs détachés)
+> sont plus coûteuses que la typographie ou les confusions simples. Plutôt que de
+> bloquer l'affichage jusqu'à la fin de toutes les règles, le correcteur peut
+> **remonter les erreurs au fil de leur découverte**, par ordre de priorité :
+>
+> 1. **Orthographe** (DAWG lookup) — quelques µs par mot, priorité max
+> 2. **Grammaire de base** (conjugation, agreement, attribute, confusion, typo) — < 5 ms
+> 3. **Grammaire complexe** (adjectifs détachés, sujet postposé, style) — optionnel
+
+**Architecture proposée :**
+
+- `Checker::check_streaming(text, opts, sender: Sender<Suggestion>)` : exécute les
+  passes dans l'ordre de priorité et envoie chaque `Suggestion` dès qu'elle est
+  produite.
+- Côté Tauri : commande `check_text_stream` retournant un **channel** Tauri v2
+  (`tauri::ipc::Channel`) — l'UI applique les soulignements en temps réel sans
+  attendre la passe « grammaire complexe ».
+- Les règles sont groupées en trois **niveaux** (`RulePriority::Fast / Normal / Deep`)
+  configurables via `CheckOptions`; les règles `Deep` peuvent être **annulées**
+  si l'utilisateur retape avant la fin.
+- Rétrocompatibilité : `Checker::check_with` reste synchrone (accumule toutes les
+  suggestions des trois niveaux) ; seule la commande Tauri exposée change.
+
+**Critère de déclenchement de cette phase :** à activer quand la latence totale des
+règles dépasse 3 ms en mediane sur une phrase de 30 mots (à mesurer sur les règles
+phase 12 réelles). Si la latence reste sous budget, le streaming peut être ajouté
+comme amélioration UX pure sans urgence.
+
+---
+
+### Phase 11 — Négation, pléonasmes et style (module optionnel)
+
+**Objectif** : couvrir le module « style » de Grammalecte — **désactivable par
+défaut** (registre/goût), précision maximale, jamais bloquant.
+
+- [ ] **« ne » manquant** (registre) : `je sais pas` → `je ne sais pas`,
+      `il a rien dit` → `n'a rien` (signalé comme familier, non comme faute dure).
+- [ ] **Pléonasmes** (liste curée originale) : `au jour d'aujourd'hui`,
+      `voire même`, `comme par exemple`, `monter en haut`, `descendre en bas`,
+      `prévoir à l'avance`, `s'avérer vrai/faux`, `car en effet`, `puis ensuite`.
+- [ ] **Barbarismes / impropriétés** : `malgré que` → `bien que`, `pallier à` →
+      `pallier`, `solutionner` → `résoudre`, `au final` → `en fin de compte`,
+      `de par` (limité).
+- [ ] **Répétitions** (style) : mot identique à courte distance — signalement
+      doux, configurable.
+- [ ] **Anglicismes** (optionnel, liste originale) : `supporter` (= accepter),
+      `réaliser` (= comprendre), `digital` (= numérique)… — purement informatif.
+- [ ] **Corpus** : `corpus/style-*.md` ; chaque sous-module derrière un flag
+      d'activation distinct (l'API publique expose le niveau de sévérité).
 
 ---
 

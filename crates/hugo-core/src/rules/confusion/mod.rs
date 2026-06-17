@@ -10,24 +10,52 @@
 //! - **Tranche 3 — ou/où, la/là/l'a, leur/leurs, peu/peut/peux**
 //!   ([`ou_ou`], [`la_la`], [`leur_leurs`], [`peu_peut`]) : une famille par module,
 //!   chacune avec son corpus reconstitué (`corpus/confusion-*.md`).
+//! - **Tranche 4 — quel(s)/quelle(s)/qu'elle(s), quand/quant, sans/s'en**
+//!   ([`quel_quelle`], [`quand_quant`], [`sans_sen`]) : idem, une famille par
+//!   module avec son corpus.
+//! - **Tranche 5 — terminaisons homophones -er/-é/-ez** ([`terminaisons`],
+//!   [`terminaisons::TerminaisonsConfusion`]) :
+//!   cf. [`corpus/confusion-terminaisons.md`](../../../../../corpus/confusion-terminaisons.md).
 //!
 //! Les helpers communs aux tranches (normalisation, calque de casse, et —
 //! depuis la tranche 3 — accès au POS et tests morphologiques de
 //! participe/verbe/infinitif) vivent ici.
 
 pub mod a_a;
+pub mod accents;
 pub mod ce_se;
+pub mod dans_den;
+pub mod et_est;
 pub mod la_la;
 pub mod leur_leurs;
+pub mod ni_ny;
 pub mod ou_ou;
 pub mod peu_peut;
+pub mod plutot;
+pub mod pres_pret;
+pub mod quand_quant;
+pub mod quel_quelle;
+pub mod sa_ca;
+pub mod sans_sen;
+pub mod terminaisons;
 
 pub use a_a::AAConfusion;
+pub use accents::AccentsConfusion;
 pub use ce_se::CeSeConfusion;
+pub use dans_den::DansDenConfusion;
+pub use et_est::EtEstConfusion;
 pub use la_la::LaConfusion;
 pub use leur_leurs::LeurConfusion;
+pub use ni_ny::NiNyConfusion;
 pub use ou_ou::OuConfusion;
 pub use peu_peut::PeuConfusion;
+pub use plutot::PlutotConfusion;
+pub use pres_pret::PresPreConfusion;
+pub use quand_quant::QuandConfusion;
+pub use quel_quelle::QuelConfusion;
+pub use sa_ca::SaCaConfusion;
+pub use sans_sen::SansConfusion;
+pub use terminaisons::TerminaisonsConfusion;
 
 use crate::morpho;
 use crate::pos::{Tagged, Upos};

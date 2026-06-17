@@ -150,13 +150,31 @@ fn correction_word(
         }
 
         // se → ce : se devant un nom/nom propre/adjectif, ou un relatif que/qui/dont.
+        // Repli morphologique : si le CRF étiquette le mot suivant VERB (ex.
+        // « dîner » = infinitif/nom homonyme), on accepte quand même s'il a une
+        // lecture nominale dans le lexique — « Se dîner » → « Ce dîner ».
+        // Garde : si « se » est précédé d'un sujet (pronom ou nom/propn), c'est
+        // le réfléchi légitime (« il se livre »), pas le démonstratif.
         "se" => {
+            if let Some(prev) = subject_before(sentence, i) {
+                let prev_is_subj =
+                    SUBJECT_PRONOUNS.contains(&normalize(sentence[prev].1.text.as_str()).as_str())
+                        || matches!(
+                            tags[sentence[prev].0].upos,
+                            Upos::Noun | Upos::Propn
+                        );
+                if prev_is_subj {
+                    return None;
+                }
+            }
             let next = sentence.get(i + 1)?;
             let next_norm = normalize(next.1.text.as_str());
-            let next_is_nominal = matches!(
-                upos(sentence, i + 1, tags),
-                Upos::Noun | Upos::Propn | Upos::Adj
-            );
+            let next_upos = upos(sentence, i + 1, tags);
+            let next_is_nominal = matches!(next_upos, Upos::Noun | Upos::Propn | Upos::Adj)
+                || (next_upos == Upos::Verb
+                    && morpho::lookup(&next.1.text)
+                        .iter()
+                        .any(|m| m.category == morpho::MorphCategory::Noun));
             (next_is_nominal || RELATIVES_AFTER_CE.contains(&next_norm.as_str())).then_some("ce")
         }
 
