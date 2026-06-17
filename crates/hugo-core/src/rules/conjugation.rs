@@ -27,13 +27,21 @@
 //! `VERB`/`AUX` (un nom homographe — « des points/barres » — n'est plus pris
 //! pour un verbe) ; un groupe nominal précédé d'un token `VERB`/`AUX` est un
 //! complément (y compris derrière un **infinitif**, que `is_finite_verb` ne
-//! voit pas) ; « des »/« du » après un nom est un complément en *de + article*,
+//! voit pas) ; « des »/« du » après un nom est un complément en *de + article*.
+//!
+//! **Repli par suffixe 1ᵉʳ groupe.** Quand le Lefff ne connaît pas la forme
+//! conjuguée d'un verbe (ex. « implémentes », « conjugueriez » — absents de la
+//! table des formes mais présents en tant qu'infinitif), le CRF étiquette
+//! correctement `VERB`. Dans ce cas, `agree_at` tente de retrouver l'infinitif
+//! et le mode/temps par analyse des **suffixes réguliers** des verbes du 1ᵉʳ
+//! groupe (-er). Le guard `morpho::lookup(infinitif) → VERB` évite les faux
+//! infinitifs produits par dépréfixation sur un verbe du 2ᵉ ou 3ᵉ groupe.
 //! pas un sujet ; un pronom après le relatif « qui » est un objet.
 
 use std::collections::HashSet;
 
 use super::{lexical_sentences, Rule};
-use crate::morpho::{self, MorphCategory, MoodTense, Number, Person};
+use crate::morpho::{self, MoodTense, MorphCategory, Number, Person};
 use crate::pos::{Tagged, Upos};
 use crate::tokenizer::Token;
 use crate::Suggestion;
@@ -67,7 +75,7 @@ fn normalize(text: &str) -> String {
         .to_string()
 }
 
-/// Personne et nombre d'un pronom personnel sujet, le cas échéant.
+/// Personne et nombre d'un pronom personnel ou indéfini sujet.
 fn subject_pronoun(text: &str) -> Option<(Person, Number)> {
     Some(match normalize(text).as_str() {
         "je" | "j" => (Person::First, Number::Singular),
@@ -76,6 +84,10 @@ fn subject_pronoun(text: &str) -> Option<(Person, Number)> {
         "nous" => (Person::First, Number::Plural),
         "vous" => (Person::Second, Number::Plural),
         "ils" | "elles" => (Person::Third, Number::Plural),
+        // Pronoms indéfinis toujours singuliers (accord 3e pers. sg.).
+        "chacun" | "chacune" | "nul" | "nulle" | "personne" | "quiconque" => {
+            (Person::Third, Number::Singular)
+        }
         _ => return None,
     })
 }
@@ -85,8 +97,8 @@ fn subject_pronoun(text: &str) -> Option<(Person, Number)> {
 /// fiable, contrairement au genre.
 fn determiner_number(text: &str) -> Option<Number> {
     Some(match normalize(text).as_str() {
-        "le" | "la" | "l" | "un" | "une" | "ce" | "cet" | "cette" | "mon" | "ton" | "son" | "ma"
-        | "ta" | "sa" | "notre" | "votre" | "leur" => Number::Singular,
+        "le" | "la" | "l" | "un" | "une" | "ce" | "cet" | "cette" | "mon" | "ton" | "son"
+        | "ma" | "ta" | "sa" | "notre" | "votre" | "leur" => Number::Singular,
         "les" | "des" | "ces" | "mes" | "tes" | "ses" | "nos" | "vos" | "leurs" => Number::Plural,
         _ => return None,
     })
@@ -96,8 +108,20 @@ fn determiner_number(text: &str) -> Option<Number> {
 fn is_clitic(text: &str) -> bool {
     matches!(
         normalize(text).as_str(),
-        "ne" | "n" | "me" | "m" | "te" | "t" | "se" | "s" | "le" | "la" | "les" | "lui" | "leur"
-            | "y" | "en"
+        "ne" | "n"
+            | "me"
+            | "m"
+            | "te"
+            | "t"
+            | "se"
+            | "s"
+            | "le"
+            | "la"
+            | "les"
+            | "lui"
+            | "leur"
+            | "y"
+            | "en"
     )
 }
 
@@ -136,6 +160,26 @@ fn is_finite_verb(text: &str) -> bool {
     !morpho::verb_forms(text).is_empty()
 }
 
+/// Vrai si le jeton à l'index lexical `idx` **occupe la position sujet** : un
+/// nom/nom propre, ou un pronom démonstratif/indéfini sujet (`cela`, `ça`,
+/// `ceci`, `ce`, `on`). Sert à reconnaître qu'un « vous »/« nous » suivant est en
+/// réalité un **clitique objet** (« cela vous suffit », « l'agence vous
+/// assure ») et non le sujet.
+fn fills_subject_slot(text: &str, idx: usize, tags: Option<&[Tagged]>) -> bool {
+    if matches!(
+        normalize(text).as_str(),
+        "cela" | "ça" | "ca" | "ceci" | "ce" | "on"
+    ) {
+        return true;
+    }
+    match tags {
+        Some(tags) => matches!(tags[idx].upos, Upos::Noun | Upos::Propn),
+        None => morpho::lookup(text)
+            .iter()
+            .any(|m| m.category == MorphCategory::Noun),
+    }
+}
+
 /// Vrai si le jeton d'index `k+1` admet une analyse nominale. Sert à décider
 /// qu'un mot nom/adjectif ambigu (« petit », « principales »…) est en réalité un
 /// adjectif antéposé lorsqu'un nom le suit.
@@ -148,20 +192,35 @@ fn next_is_noun(sentence: &[(usize, &Token)], k: usize) -> bool {
 }
 
 /// Cherche le nom tête à partir de l'index `start`, en sautant les adjectifs
-/// antéposés (y compris les homographes nom/adjectif suivis d'un autre nom).
+/// antéposés (y compris les homographes nom/adjectif suivis d'un autre nom)
+/// **et les numéraux** (« les deux vigies », « les trois enfants »).
+/// Les numéraux sont identifiés par l'étiquette POS `NUM` du CRF (quand
+/// disponible) ou par une liste de cardinaux courants.
 /// Renvoie l'index du nom, ou `None`.
-fn noun_head_from(sentence: &[(usize, &Token)], start: usize) -> Option<usize> {
+fn noun_head_from(
+    sentence: &[(usize, &Token)],
+    start: usize,
+    tags: Option<&[Tagged]>,
+) -> Option<usize> {
     let mut k = start;
     let mut steps = 0;
+    // Dernière position d'un numéral vu : si aucun nom ne suit, le numéral
+    // lui-même est la tête (« les deux regardaient » → tête = « deux »,
+    // « les 2 regardaient » → tête = « 2 »).
+    let mut last_num: Option<usize> = None;
     loop {
         if k >= sentence.len() || steps > MAX_SKIP {
-            return None;
+            return last_num;
         }
-        let analyses = morpho::lookup(&sentence[k].1.text);
+        let (tok_idx, tok) = sentence[k];
+        let analyses = morpho::lookup(&tok.text);
         let has_noun = analyses.iter().any(|m| m.category == MorphCategory::Noun);
         let has_adj = analyses
             .iter()
             .any(|m| m.category == MorphCategory::Adjective);
+        let is_num = tags.map_or(false, |tags| tags[tok_idx].upos == Upos::Num)
+            || is_cardinal_numeral(&tok.text)
+            || tok.kind == crate::tokenizer::TokenKind::Number;
         if has_noun {
             if has_adj && next_is_noun(sentence, k) {
                 k += 1;
@@ -170,19 +229,60 @@ fn noun_head_from(sentence: &[(usize, &Token)], start: usize) -> Option<usize> {
             }
             return Some(k);
         }
-        if has_adj {
+        if has_adj || is_num {
+            if is_num {
+                last_num = Some(k);
+            }
             k += 1;
             steps += 1;
             continue;
         }
-        return None;
+        // Token non-sautables (verbe, adverbe…) : si un numéral a été vu
+        // avant, il est la tête du GN (ex. « les deux regardaient »).
+        return last_num;
     }
+}
+
+/// Cardinaux simples dont le Lefff ne retourne pas toujours une analyse
+/// adjectivale — on les saute comme les adjectifs antéposés.
+fn is_cardinal_numeral(text: &str) -> bool {
+    matches!(
+        text.to_lowercase().as_str(),
+        "zéro"
+            | "un"
+            | "une"
+            | "deux"
+            | "trois"
+            | "quatre"
+            | "cinq"
+            | "six"
+            | "sept"
+            | "huit"
+            | "neuf"
+            | "dix"
+            | "onze"
+            | "douze"
+            | "treize"
+            | "quatorze"
+            | "quinze"
+            | "seize"
+            | "vingt"
+            | "trente"
+            | "quarante"
+            | "cinquante"
+            | "soixante"
+            | "cent"
+            | "mille"
+    )
 }
 
 /// Vrai si le jeton est analysé comme adjectif sans être par ailleurs un verbe
 /// conjugué (pour ne pas sauter le verbe par mégarde).
+/// Guard : un pronom sujet comme « tu » n'est jamais sauté, même s'il a une
+/// lecture participiale-adjectivale (ex. « tu » = participe passé de *taire*).
 fn is_skippable_adjective(text: &str) -> bool {
-    !is_finite_verb(text)
+    subject_pronoun(text).is_none()
+        && !is_finite_verb(text)
         && morpho::lookup(text)
             .iter()
             .any(|m| m.category == MorphCategory::Adjective)
@@ -218,7 +318,8 @@ fn detect_subject(
         // Si le jeton précédent est déjà un sujet ou un clitique, ce pronom est
         // probablement complément (« je vous parle ») → on l'ignore.
         if i > 0 {
-            let prev = &sentence[i - 1].1.text;
+            let (prev_idx, prev_tok) = sentence[i - 1];
+            let prev = &prev_tok.text;
             if subject_pronoun(prev).is_some() || is_clitic(prev) {
                 return None;
             }
@@ -228,14 +329,64 @@ fn detect_subject(
             if tags.is_some() && normalize(prev) == "qui" {
                 return None;
             }
+            // « vous »/« nous » sont aussi des **clitiques objets** : précédés
+            // d'un remplisseur de la position sujet (nom, nom propre, « cela »…),
+            // ils ne sont pas le sujet (« cela vous suffit », « l'agence vous
+            // assure »). Les autres pronoms (`il`, `je`…) ne sont jamais objets.
+            if matches!(normalize(text).as_str(), "vous" | "nous")
+                && fills_subject_slot(prev, prev_idx, tags)
+            {
+                return None;
+            }
         }
+        // Pour les indéfinis de type « chacun de NP » : sauter le complément
+        // partitif (de/des + [adj*] nom) pour atteindre le verbe. On utilise
+        // les tags CRF quand disponibles ; sans tags, on reste au token suivant.
+        const INDEF_WITH_PARTITIVE: &[&str] =
+            &["chacun", "chacune", "nul", "nulle", "personne", "quiconque"];
+        let verb_start = if INDEF_WITH_PARTITIVE.contains(&normalize(text).as_str()) {
+            if let Some(tags) = tags {
+                // Chercher le premier VERB/AUX après la position courante.
+                (i + 1..sentence.len())
+                    .find(|&k| {
+                        matches!(tags[sentence[k].0].upos, Upos::Verb | Upos::Aux)
+                    })
+                    .unwrap_or(i + 1)
+            } else {
+                i + 1
+            }
+        } else {
+            i + 1
+        };
         return Some(Subject {
             person,
             number,
             label: text.clone(),
-            verb_start: i + 1,
+            verb_start,
             skip_adjectives: false,
         });
+    }
+
+    // --- Sujet nom propre nu (sans déterminant, étiquette Propn par le CRF). ---
+    // « Marc puisses » → Marc est 3e pers. sg. Garde : étiquette obligatoire
+    // (évite de confondre un nom commun en début de phrase avec un nom propre).
+    if let Some(tags) = tags {
+        if tags[sentence[i].0].upos == crate::pos::Upos::Propn {
+            // Ne pas prendre un nom propre objet (précédé d'un clitique ou d'une prépo).
+            let blocked = i > 0 && {
+                let prev = &sentence[i - 1].1.text;
+                is_clitic(prev) || is_preposition(prev)
+            };
+            if !blocked {
+                return Some(Subject {
+                    person: Person::Third,
+                    number: Number::Singular,
+                    label: text.clone(),
+                    verb_start: i + 1,
+                    skip_adjectives: false,
+                });
+            }
+        }
     }
 
     // --- Sujet nominal (déterminant + [adjectifs] + nom). ---
@@ -280,8 +431,8 @@ fn detect_subject(
         }
     }
 
-    // Chercher le nom tête en sautant les adjectifs antéposés.
-    let head = noun_head_from(sentence, i + 1)?;
+    // Chercher le nom tête en sautant les adjectifs et numéraux antéposés.
+    let head = noun_head_from(sentence, i + 1, tags)?;
 
     Some(Subject {
         person: Person::Third,
@@ -329,13 +480,16 @@ fn is_probable_proper_noun(text: &str) -> bool {
 /// est un pronom, un groupe nominal (déterminant + adjectifs + nom), un nom
 /// commun nu, ou un nom propre présumé.
 fn parse_conjunct(sentence: &[(usize, &Token)], j: usize) -> Option<(u8, usize, usize)> {
+    if j >= sentence.len() {
+        return None;
+    }
     let tok = sentence[j].1;
     if let Some(p) = conjunct_pronoun_person(&tok.text) {
         return Some((p, j, j + 1));
     }
     // Groupe nominal : déterminant + adjectifs antéposés + nom tête.
     if determiner_number(&tok.text).is_some() {
-        return noun_head_from(sentence, j + 1).map(|h| (3, h, h + 1));
+        return noun_head_from(sentence, j + 1, None).map(|h| (3, h, h + 1));
     }
     // Nom commun nu.
     if morpho::lookup(&tok.text)
@@ -356,6 +510,12 @@ fn parse_conjunct(sentence: &[(usize, &Token)], j: usize) -> Option<(u8, usize, 
 /// Renvoie `(personne, index_de_début_du_verbe, libellé)`. La personne est la
 /// plus prioritaire des membres (1 > 2 > 3), le nombre étant toujours pluriel.
 fn detect_coordinated(sentence: &[(usize, &Token)], i: usize) -> Option<(Person, usize, String)> {
+    // Une coordination introduite par une **préposition** est un complément, pas
+    // un sujet (« …producteurs de Saverne et environs organise » : « Saverne et
+    // environs » complète « producteurs », ce n'est pas le sujet de « organise »).
+    if i > 0 && is_preposition(&sentence[i - 1].1.text) {
+        return None;
+    }
     let (mut person, mut head, mut end) = parse_conjunct(sentence, i)?;
     let mut labels = vec![sentence[head].1.text.clone()];
     while end < sentence.len() && normalize(&sentence[end].1.text) == "et" {
@@ -383,7 +543,11 @@ fn detect_coordinated(sentence: &[(usize, &Token)], i: usize) -> Option<(Person,
 
 /// Index du jeton candidat verbe à partir de `verb_start`, en sautant les
 /// clitiques (et les adjectifs si `skip_adjectives`).
-fn find_verb(sentence: &[(usize, &Token)], verb_start: usize, skip_adjectives: bool) -> Option<usize> {
+fn find_verb(
+    sentence: &[(usize, &Token)],
+    verb_start: usize,
+    skip_adjectives: bool,
+) -> Option<usize> {
     let mut k = verb_start;
     let mut steps = 0;
     while k < sentence.len() && steps < MAX_SKIP {
@@ -398,55 +562,217 @@ fn find_verb(sentence: &[(usize, &Token)], verb_start: usize, skip_adjectives: b
     (k < sentence.len()).then_some(k)
 }
 
+/// Retrouve l'infinitif et le mode/temps probable d'un verbe du 1ᵉʳ groupe
+/// (-er) à partir de sa forme conjuguée, par analyse des suffixes réguliers.
+///
+/// Retourne `(infinitif, mode_temps)` ou `None` si la forme ne correspond à
+/// aucun patron -er reconnu.
+///
+/// Ambiguïté conditionnel/imparfait : après suppression d'un suffixe commun
+/// (-aient, -iez, -ions, -ait, -ais), si le reste se termine en « er » c'est
+/// le conditionnel (infinitif déjà reconstitué) ; sinon c'est l'imparfait
+/// (ajouter « er » pour former l'infinitif).
+fn guess_er_infinitive(form: &str) -> Option<(String, MoodTense)> {
+    let low = form.to_lowercase();
+
+    // Suffixes dont le reste indique conditionnel (se termine en "er") ou
+    // imparfait (ajouter "er") selon le résidu. Vérifiés avant les suffixes
+    // purement imparfaits/présent pour éviter les ambiguïtés.
+    for suffix in ["aient", "iez", "ions", "ait", "ais"] {
+        if let Some(rem) = low.strip_suffix(suffix) {
+            let (inf, mt) = if rem.ends_with("er") {
+                (rem.to_string(), MoodTense::ConditionalPresent)
+            } else {
+                (format!("{}er", rem), MoodTense::IndicativeImperfect)
+            };
+            return Some((inf, mt));
+        }
+    }
+    // Futur simple (infinitif + terminaison ; toujours conditionnel).
+    for suffix in ["eront", "erez", "erons", "eras", "erai", "era"] {
+        if let Some(rem) = low.strip_suffix(suffix) {
+            return Some((format!("{}er", rem), MoodTense::IndicativeFuture));
+        }
+    }
+    // Présent de l'indicatif (radical + terminaison).
+    for suffix in ["ent", "ons", "ez"] {
+        if let Some(rem) = low.strip_suffix(suffix) {
+            return Some((format!("{}er", rem), MoodTense::IndicativePresent));
+        }
+    }
+    // "-es" (2sg) : strip "es" → radical → ajouter "er" = infinitif.
+    if let Some(rem) = low.strip_suffix("es") {
+        return Some((format!("{}er", rem), MoodTense::IndicativePresent));
+    }
+    None
+}
+
+/// Génère une forme régulière du 1ᵉʳ groupe (-er) pour un mode/temps, une
+/// personne et un nombre donnés.
+///
+/// Repli quand `morpho::conjugate` échoue sur un verbe absent du Lefff. Ne
+/// gère pas les variations orthographiques (-ger → -geons, -cer → -çons) :
+/// les résultats peuvent être approximatifs pour ces sous-groupes.
+fn generate_er_form(infinitive: &str, mt: MoodTense, person: Person, number: Number) -> Option<String> {
+    // Le radical est l'infinitif sans « er ».
+    let stem = infinitive.strip_suffix("er")?;
+    Some(match (mt, person, number) {
+        // Présent de l'indicatif
+        (MoodTense::IndicativePresent, Person::First | Person::Third, Number::Singular) => {
+            format!("{}e", stem)
+        }
+        (MoodTense::IndicativePresent, Person::Second, Number::Singular) => {
+            format!("{}es", stem)
+        }
+        (MoodTense::IndicativePresent, Person::First, Number::Plural) => {
+            format!("{}ons", stem)
+        }
+        (MoodTense::IndicativePresent, Person::Second, Number::Plural) => {
+            format!("{}ez", stem)
+        }
+        (MoodTense::IndicativePresent, Person::Third, Number::Plural) => {
+            format!("{}ent", stem)
+        }
+        // Imparfait de l'indicatif
+        (MoodTense::IndicativeImperfect, Person::First | Person::Second, Number::Singular) => {
+            format!("{}ais", stem)
+        }
+        (MoodTense::IndicativeImperfect, Person::Third, Number::Singular) => {
+            format!("{}ait", stem)
+        }
+        (MoodTense::IndicativeImperfect, Person::First, Number::Plural) => {
+            format!("{}ions", stem)
+        }
+        (MoodTense::IndicativeImperfect, Person::Second, Number::Plural) => {
+            format!("{}iez", stem)
+        }
+        (MoodTense::IndicativeImperfect, Person::Third, Number::Plural) => {
+            format!("{}aient", stem)
+        }
+        // Conditionnel présent (infinitif + terminaison)
+        (MoodTense::ConditionalPresent, Person::First | Person::Second, Number::Singular) => {
+            format!("{}erais", stem)
+        }
+        (MoodTense::ConditionalPresent, Person::Third, Number::Singular) => {
+            format!("{}erait", stem)
+        }
+        (MoodTense::ConditionalPresent, Person::First, Number::Plural) => {
+            format!("{}erions", stem)
+        }
+        (MoodTense::ConditionalPresent, Person::Second, Number::Plural) => {
+            format!("{}eriez", stem)
+        }
+        (MoodTense::ConditionalPresent, Person::Third, Number::Plural) => {
+            format!("{}eraient", stem)
+        }
+        // Futur simple (infinitif + terminaison)
+        (MoodTense::IndicativeFuture, Person::First, Number::Singular) => {
+            format!("{}erai", stem)
+        }
+        (MoodTense::IndicativeFuture, Person::Second, Number::Singular) => {
+            format!("{}eras", stem)
+        }
+        (MoodTense::IndicativeFuture, Person::Third, Number::Singular) => {
+            format!("{}era", stem)
+        }
+        (MoodTense::IndicativeFuture, Person::First, Number::Plural) => {
+            format!("{}erons", stem)
+        }
+        (MoodTense::IndicativeFuture, Person::Second, Number::Plural) => {
+            format!("{}erez", stem)
+        }
+        (MoodTense::IndicativeFuture, Person::Third, Number::Plural) => {
+            format!("{}eront", stem)
+        }
+        _ => return None,
+    })
+}
+
 /// Si le verbe au jeton `k` n'accorde pas avec `(person, number)`, renvoie la
 /// suggestion de correction.
+///
+/// `tags` est la tranche des étiquettes POS (alignée sur les tokens d'origine).
+/// Quand elle est fournie, un repli par suffixe du 1ᵉʳ groupe est tenté pour
+/// les verbes absents du Lefff mais étiquetés `VERB`/`AUX` par le CRF.
 fn agree_at(
     sentence: &[(usize, &Token)],
     k: usize,
     person: Person,
     number: Number,
     label: &str,
+    tags: Option<&[Tagged]>,
 ) -> Option<Suggestion> {
     let verb_token = sentence.get(k)?.1;
 
-    // Formes verbales finies, hors impératif (qui n'a pas de sujet).
+    // Chemin Lefff : formes verbales finies, hors impératif.
     let finite: Vec<_> = morpho::verb_forms(&verb_token.text)
         .into_iter()
         .filter(|v| v.mood_tense != MoodTense::Imperative)
         .collect();
-    if finite.is_empty() {
+
+    if !finite.is_empty() {
+        // Déjà accordé ?
+        if finite
+            .iter()
+            .any(|v| v.person == person && v.number == number)
+        {
+            return None;
+        }
+        // Lemme unique seulement (sinon homographe ambigu : suis, vis…).
+        let lemmas: HashSet<&str> = finite.iter().map(|v| v.lemma.as_str()).collect();
+        if lemmas.len() != 1 {
+            return None;
+        }
+        let lemma = finite[0].lemma.clone();
+
+        // Cibler le même mode/temps que le verbe fautif (indicatif présent par
+        // défaut s'il fait partie des analyses).
+        let target_mt = if finite
+            .iter()
+            .any(|v| v.mood_tense == MoodTense::IndicativePresent)
+        {
+            MoodTense::IndicativePresent
+        } else {
+            finite[0].mood_tense
+        };
+
+        let corrected = morpho::conjugate(&lemma, target_mt, person, number)?;
+        if corrected.eq_ignore_ascii_case(&verb_token.text) {
+            return None;
+        }
+        return Some(Suggestion {
+            span: verb_token.span,
+            message: format!(
+                "Accord sujet–verbe : « {} » ne s'accorde pas avec le sujet « {} ».",
+                verb_token.text, label
+            ),
+            replacements: vec![match_case(&verb_token.text, &corrected)],
+            rule_id: RULE_ID,
+        });
+    }
+
+    // Repli par suffixe 1ᵉʳ groupe : le Lefff ne connaît pas cette forme
+    // conjuguée, mais le CRF l'étiquette VERB/AUX.
+    let tags = tags?;
+    let tok_orig_idx = sentence[k].0;
+    if !matches!(tags[tok_orig_idx].upos, Upos::Verb | Upos::Aux) {
         return None;
     }
-    // Déjà accordé ?
-    if finite
+    let (infinitive, mt) = guess_er_infinitive(&verb_token.text)?;
+    // Guard : l'infinitif reconstitué doit être un verbe connu dans le Lefff
+    // (évite les faux infinitifs produits sur des verbes du 2ᵉ/3ᵉ groupe).
+    if !morpho::lookup(&infinitive)
         .iter()
-        .any(|v| v.person == person && v.number == number)
+        .any(|m| m.category == MorphCategory::Verb)
     {
         return None;
     }
-    // Lemme unique seulement (sinon homographe ambigu : suis, vis…).
-    let lemmas: HashSet<&str> = finite.iter().map(|v| v.lemma.as_str()).collect();
-    if lemmas.len() != 1 {
-        return None;
-    }
-    let lemma = finite[0].lemma.clone();
-
-    // Cibler le même mode/temps que le verbe fautif (indicatif présent par
-    // défaut s'il fait partie des analyses).
-    let target_mt = if finite
-        .iter()
-        .any(|v| v.mood_tense == MoodTense::IndicativePresent)
-    {
-        MoodTense::IndicativePresent
-    } else {
-        finite[0].mood_tense
-    };
-
-    let corrected = morpho::conjugate(&lemma, target_mt, person, number)?;
+    // Générer la forme correcte pour ce sujet.
+    let corrected = morpho::conjugate(&infinitive, mt, person, number)
+        .or_else(|| generate_er_form(&infinitive, mt, person, number))?;
     if corrected.eq_ignore_ascii_case(&verb_token.text) {
         return None;
     }
-
     Some(Suggestion {
         span: verb_token.span,
         message: format!(
@@ -480,7 +806,7 @@ impl SubjectVerbAgreement {
                         continue;
                     }
                     claimed.insert(k);
-                    if let Some(s) = agree_at(sentence, k, person, Number::Plural, &label) {
+                    if let Some(s) = agree_at(sentence, k, person, Number::Plural, &label, tags) {
                         local.push(s);
                     }
                 }
@@ -498,7 +824,7 @@ impl SubjectVerbAgreement {
                         continue;
                     }
                     if let Some(s) =
-                        agree_at(sentence, k, subject.person, subject.number, &subject.label)
+                        agree_at(sentence, k, subject.person, subject.number, &subject.label, tags)
                     {
                         local.push(s);
                     }
@@ -619,6 +945,20 @@ mod tests {
     fn nominal_plural_with_postnominal_adjective() {
         // « les chats noirs mange » → « mangent » (adjectif postposé sauté).
         assert_eq!(first("les chats noirs mange").as_deref(), Some("mangent"));
+    }
+
+    #[test]
+    fn nominal_plural_with_numeral() {
+        // Numéral mot entre déterminant et nom → sauté.
+        assert_eq!(first("les deux vigies regardait").as_deref(), Some("regardaient"));
+        assert_eq!(first("les trois enfants dort").as_deref(), Some("dorment"));
+    }
+
+    #[test]
+    fn nominal_plural_numeral_as_head() {
+        // Numéral sans nom suivant : le numéral est la tête (« les deux regardaient »).
+        assert_eq!(first("les deux regardait").as_deref(), Some("regardaient"));
+        assert_eq!(first("Les 2 regardait au loin").as_deref(), Some("regardaient"));
     }
 
     #[test]
@@ -781,5 +1121,105 @@ mod tests {
     fn pos_path_relative_object_pronoun_is_not_subject() {
         // « nous », objet du relatif « qui », n'est pas le sujet de « a ».
         assert_eq!(tagged_count("le problème qui nous a été posé"), 0);
+    }
+
+    #[test]
+    fn pos_path_object_vous_nous_is_not_subject() {
+        // « vous »/« nous » sont aussi des clitiques objets : précédés d'un
+        // remplisseur de la position sujet (« cela », un nom), ils ne sont pas le
+        // sujet. Le verbe s'accorde avec le vrai sujet (3ᵉ sing.) — rien à signaler.
+        assert_eq!(tagged_count("arrêtez la lecture si cela vous suffit"), 0);
+        assert_eq!(
+            tagged_count("notre expérience vous assure la réalisation"),
+            0
+        );
+        assert_eq!(
+            tagged_count("la rue de Nancy vous permettra de trouver mieux"),
+            0
+        );
+        // Un « vous » réellement sujet reste corrigé.
+        assert_eq!(tagged_first("vous mange").as_deref(), Some("mangez"));
+    }
+
+    #[test]
+    fn pos_path_coordination_after_preposition_is_not_subject() {
+        // « Saverne et environs » complète « producteurs » (introduit par « de ») :
+        // ce n'est pas le sujet de « organise ».
+        assert_eq!(
+            tagged_count("l'association des producteurs de Saverne et environs organise un cours"),
+            0
+        );
+        // Une vraie coordination sujet reste corrigée.
+        assert_eq!(
+            tagged_first("Pierre et Marie mange").as_deref(),
+            Some("mangent")
+        );
+    }
+
+    // --- Repli par suffixe 1ᵉʳ groupe (verbes absents du Lefff). ---
+
+    fn tagged_first_sva(text: &str) -> Option<String> {
+        let tokens = tokenize(text);
+        let tags = crate::pos::tag(&tokens);
+        SubjectVerbAgreement
+            .check_tagged(&tokens, &tags)
+            .into_iter()
+            .find(|s| s.rule_id == "subject_verb_agreement")
+            .and_then(|s| s.replacements.into_iter().next())
+    }
+
+    fn tagged_count_sva(text: &str) -> usize {
+        let tokens = tokenize(text);
+        let tags = crate::pos::tag(&tokens);
+        SubjectVerbAgreement
+            .check_tagged(&tokens, &tags)
+            .iter()
+            .filter(|s| s.rule_id == "subject_verb_agreement")
+            .count()
+    }
+
+    #[test]
+    fn er_verb_not_in_lefff_2sg_with_1pl_subject() {
+        // « nous implémentes » : forme 2sg (-es) mais sujet 1pl → implémentons.
+        assert_eq!(
+            tagged_first_sva("nous implémentes la phase 12").as_deref(),
+            Some("implémentons")
+        );
+    }
+
+    #[test]
+    fn er_verb_not_in_lefff_conditional_2pl_with_1sg_subject() {
+        // « je conjugueriez » : forme conditionnelle 2pl (-eriez) mais sujet 1sg.
+        assert_eq!(
+            tagged_first_sva("je conjugueriez avec facilité").as_deref(),
+            Some("conjuguerais")
+        );
+    }
+
+    #[test]
+    fn er_verb_not_in_lefff_correct_form_is_silent() {
+        // Formes correctes avec des verbes rares → pas de faux positif.
+        assert_eq!(tagged_count_sva("nous implémentons la phase 12"), 0);
+        assert_eq!(tagged_count_sva("je conjuguerais avec facilité"), 0);
+    }
+
+    // --- Verbes irréguliers avec formes hors-Lefff (table de patch). ---
+
+    #[test]
+    fn aller_passe_simple_vous_3pl_form() {
+        // « vous allèrent » : passé simple 3pl ≠ vous (2pl) → « allâtes ».
+        assert_eq!(
+            tagged_first_sva("Vous allèrent au marché hier matin.").as_deref(),
+            Some("allâtes")
+        );
+    }
+
+    #[test]
+    fn irregular_verb_elle_prends() {
+        // « elle prends » : 1/2sg de prendre ≠ 3sg → « prend ».
+        assert_eq!(
+            tagged_first_sva("Elle prends le train tous les matins.").as_deref(),
+            Some("prend")
+        );
     }
 }

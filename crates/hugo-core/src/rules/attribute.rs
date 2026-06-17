@@ -154,6 +154,11 @@ fn subject_features(token: &Token) -> Option<(Gender, Number)> {
     if nouns.is_empty() {
         return None;
     }
+    // Si une analyse a un nombre indéterminé (forme invariable — ex. « fils »
+    // qui est à la fois sg et pl), on ne peut pas choisir le nombre → abandon.
+    if nouns.iter().any(|m| m.number.is_none()) {
+        return None;
+    }
     let gender = consensus(nouns.iter().map(|m| m.gender))?;
     let number = consensus(nouns.iter().map(|m| m.number))?;
     // Un genre épicène ne permet pas de choisir la forme de l'adjectif.
@@ -207,6 +212,128 @@ fn match_case(original: &str, replacement: &str) -> String {
     }
 }
 
+/// Vrai si l'étiquette POS du jeton est compatible avec un **attribut**
+/// (adjectif ou participe passé). On exclut les catégories qui ne sont jamais
+/// attribut — au premier chef la **préposition** (`ADP`) — afin de neutraliser
+/// les homographes préposition/adjectif : « sur » est aussi l'adjectif « acide »
+/// au lexique, mais « elle est *sur* le côté » (où le CRF l'étiquette `ADP`) ne
+/// doit pas devenir « sure ». Les attributs réels, même mal étiquetés `VERB` par
+/// le CRF (« content », « parti », « allé »), restent acceptés.
+fn is_attribute_tag(upos: Upos) -> bool {
+    !matches!(
+        upos,
+        Upos::Adp
+            | Upos::Det
+            | Upos::Pron
+            | Upos::Cconj
+            | Upos::Sconj
+            | Upos::Num
+            | Upos::Part
+            | Upos::Punct
+            | Upos::Sym
+            | Upos::Intj
+    )
+}
+
+/// Vrai si le jeton est un déterminant pouvant précéder un nom sujet — utile
+/// pour le saut lors de la détection de coordination (`A et B`).
+fn is_subject_det(text: &str) -> bool {
+    matches!(
+        normalize(text).as_str(),
+        "le" | "la" | "les" | "l"
+            | "un" | "une" | "des"
+            | "ce" | "cet" | "cette" | "ces"
+            | "mon" | "ton" | "son" | "ma" | "ta" | "sa"
+            | "mes" | "tes" | "ses"
+            | "notre" | "votre" | "leur"
+            | "nos" | "vos" | "leurs"
+            | "du" | "au" | "aux"
+    )
+}
+
+/// Genre et nombre portés par un déterminant singulier ou pluriel.
+///
+/// Retourne `(genre_ou_None, nombre)`. Le genre est `None` pour les
+/// déterminants pluriels (« les », « des »…) ou l'article élidé « l' » où
+/// le genre ne peut être inféré du déterminant seul. Sert de contexte pour
+/// désambiguïser les noms épicènes (ex. « voile » = Masc ou Fém).
+fn det_features(text: &str) -> Option<(Option<Gender>, Number)> {
+    let s = normalize(text);
+    let s = s.trim_end_matches(['\'', '\u{2019}']);
+    Some(match s {
+        "le" | "ce" | "cet" | "un" | "mon" | "ton" | "son" | "notre" | "votre" | "leur"
+        | "du" | "au" => (Some(Gender::Masculine), Number::Singular),
+        "la" | "cette" | "une" | "ma" | "ta" | "sa" => (Some(Gender::Feminine), Number::Singular),
+        "les" | "ces" | "des" | "mes" | "tes" | "ses" | "nos" | "vos" | "leurs" | "aux" => {
+            (None, Number::Plural)
+        }
+        "l" => (None, Number::Singular),
+        _ => return None,
+    })
+}
+
+/// Cherche le **sujet postposé** dans la plage `lex[from..]`, en sautant les
+/// déterminants. S'arrête sur le premier nom ou nom propre et retourne ses
+/// traits (genre, nombre). Si le nom est épicène ou sans genre dans le
+/// lexique, le genre du déterminant précédent sert de contexte.
+///
+/// Cette recherche ne s'active qu'en repli lorsque la recherche arrière a
+/// échoué (pas de sujet préposé trouvé dans le chemin normal).
+fn find_postposed_subject(
+    lex: &[(usize, &Token)],
+    from: usize,
+    tags: Option<&[Tagged]>,
+) -> Option<(Gender, Number)> {
+    let mut det_g: Option<Gender> = None;
+    let mut det_n: Option<Number> = None;
+    let mut steps = 0;
+    let mut j = from;
+
+    while j < lex.len() && steps <= MAX_WINDOW {
+        let (tok_idx, tok) = lex[j];
+
+        // Déterminant : noter le genre/nombre pour lever les ambiguïtés du nom.
+        if let Some((g, n)) = det_features(&tok.text) {
+            det_g = g;
+            det_n = Some(n);
+            j += 1;
+            steps += 1;
+            continue;
+        }
+
+        // Nom ou nom propre : traits du lexique, ou traits du déterminant si
+        // le nom est épicène (genre ambigu dans Lexique).
+        let is_nominal = match tags {
+            Some(t) => matches!(t[tok_idx].upos, Upos::Noun | Upos::Propn),
+            None => morpho::lookup(&tok.text)
+                .iter()
+                .any(|m| m.category == MorphCategory::Noun),
+        };
+        if !is_nominal {
+            return None;
+        }
+
+        return subject_features(tok).or_else(|| Some((det_g?, det_n?)));
+    }
+    None
+}
+
+/// Fusionne genre et nombre de plusieurs sujets coordonnés.
+///
+/// Le masculin l'emporte sur le féminin (`géants et collines` → Masc) ;
+/// le nombre est toujours pluriel pour une coordination à deux membres ou plus.
+fn merge_subject_features(subjects: &[(Gender, Number)]) -> (Gender, Number) {
+    if subjects.len() == 1 {
+        return subjects[0];
+    }
+    let gender = if subjects.iter().any(|(g, _)| *g == Gender::Masculine) {
+        Gender::Masculine
+    } else {
+        Gender::Feminine
+    };
+    (gender, Number::Plural)
+}
+
 /// Vrai si le nom à l'index lexical `s` est **gouverné à gauche** par une
 /// préposition ou un verbe — il n'est donc pas le sujet de la copule.
 ///
@@ -233,34 +360,93 @@ fn is_governed_left(lex: &[(usize, &Token)], s: usize, tags: &[Tagged]) -> bool 
     false
 }
 
-/// Cherche le sujet en reculant depuis la copule à l'index lexical `k`, en
-/// sautant clitiques et adjectifs antéposés. Avec les tags POS, **refuse** un
-/// nom objet d'une préposition (cf. [`is_prepositional_object`]) et continue à
-/// remonter ; faute de sujet sûr dans la fenêtre, renvoie `None` (on s'abstient
-/// plutôt que d'accorder sur un faux sujet — précision > rappel).
+/// Genre et nombre d'un nom **invariable** (entrées Lexique avec `number=None`)
+/// résolus grâce au déterminant qui le précède immédiatement dans la phrase
+/// lexicale.
+///
+/// Ex. `lex[s-1]="Mon"`, `lex[s]="fils"` → "mon" = Masc. Sg. → (Masc, Sg).
+/// Ex. `lex[s-1]="les"`, `lex[s]="fils"` → "les" = Pl. → (Masc, Pl).
+///
+/// Renvoie `None` si le token n'a pas d'analyse nominale invariable, si aucun
+/// déterminant ne précède, ou si le genre est incompatible / épicène.
+fn resolve_with_det(lex: &[(usize, &Token)], s: usize) -> Option<(Gender, Number)> {
+    let tok = lex[s].1;
+    // Ne s'applique qu'aux noms dont au moins une analyse a number=None.
+    let nouns: Vec<_> = morpho::lookup(&tok.text)
+        .into_iter()
+        .filter(|m| m.category == MorphCategory::Noun && m.number.is_none())
+        .collect();
+    if nouns.is_empty() {
+        return None;
+    }
+    let gender = consensus(nouns.iter().map(|m| m.gender))?;
+    if gender == Gender::Epicene {
+        return None;
+    }
+    // Remonter en arrière en sautant les adjectifs (qu'ils soient invariables
+    // ou non — on cherche uniquement le déterminant, pas les traits de l'adjectif)
+    // jusqu'à trouver un déterminant, ou s'arrêter sur n'importe quel autre token.
+    let mut j = s;
+    while j > 0 {
+        j -= 1;
+        if let Some((det_gender, det_number)) = det_features(&lex[j].1.text) {
+            if let Some(dg) = det_gender {
+                if dg != gender {
+                    return None;
+                }
+            }
+            return Some((gender, det_number));
+        }
+        // Ce token n'est pas un déterminant : continuer seulement si c'est un
+        // adjectif (invariable ou non). Tout autre token (verbe, adverbe…)
+        // indique qu'on a quitté le groupe nominal → on s'arrête.
+        let is_adj = morpho::lookup(&lex[j].1.text)
+            .iter()
+            .any(|m| m.category == MorphCategory::Adjective);
+        if !is_adj {
+            return None;
+        }
+    }
+    None
+}
+
+/// Cherche le(s) sujet(s) en reculant depuis la copule à l'index lexical `k`.
+///
+/// **Phase 1** (logique originale) : remonte en sautant clitiques et adjectifs
+/// jusqu'au premier nom/pronom sujet. Avec les tags POS, refuse un nom régi par
+/// une préposition (`is_governed_left`) et continue à remonter.
+///
+/// **Phase 2** (coordination) : depuis le sujet trouvé, cherche un `et`/`ou`
+/// vers l'arrière (en sautant les déterminants) puis un second sujet — et ainsi
+/// de suite. Les sujets ainsi collectés sont fusionnés : le nombre est pluriel,
+/// le genre masculin si l'un au moins est masculin (règle du masculin-l'emporte).
+///
+/// Faute de sujet sûr dans la fenêtre, renvoie `None` (précision > rappel).
 fn find_subject(
     lex: &[(usize, &Token)],
     k: usize,
     tags: Option<&[Tagged]>,
 ) -> Option<(Gender, Number)> {
+    // --- Phase 1 : sujet le plus proche. ---
     let mut s = k;
     let mut steps = 0;
-    loop {
+    let first = loop {
         if s == 0 || steps > MAX_WINDOW {
             return None;
         }
         s -= 1;
         steps += 1;
         let tok = lex[s].1;
-        if let Some(f) = subject_features(tok) {
+        if let Some(f) = subject_features(tok)
+            .or_else(|| resolve_with_det(lex, s))
+        {
             if let Some(tags) = tags {
                 if is_governed_left(lex, s, tags) {
                     continue;
                 }
             }
-            return Some(f);
+            break f;
         }
-        // Sauter clitiques et adjectifs antéposés ; sinon abandonner.
         let is_adj = morpho::lookup(&tok.text)
             .iter()
             .any(|m| m.category == MorphCategory::Adjective);
@@ -268,7 +454,69 @@ fn find_subject(
             continue;
         }
         return None;
+    };
+    // `s` : position dans lex du premier sujet trouvé.
+
+    // --- Phase 2 : détection de coordination A et B [et C…]. ---
+    let mut all = vec![first];
+    let mut pos = s;
+
+    'coord: loop {
+        // Chercher "et"/"ou" en reculant depuis `pos`, en sautant les
+        // déterminants (cas « les X et les Y »).
+        let mut peek = pos;
+        loop {
+            if peek == 0 {
+                break 'coord;
+            }
+            peek -= 1;
+            let peek_lower = normalize(&lex[peek].1.text);
+            if peek_lower == "et" || peek_lower == "ou" {
+                // "et" trouvé : chercher le sujet qui le précède.
+                let et_pos = peek;
+                let mut q = et_pos;
+                loop {
+                    if q == 0 {
+                        break 'coord;
+                    }
+                    q -= 1;
+                    let qtok = lex[q].1;
+                    if let Some(f) = subject_features(qtok)
+                        .or_else(|| resolve_with_det(lex, q))
+                    {
+                        if let Some(tags) = tags {
+                            if is_governed_left(lex, q, tags) {
+                                break 'coord;
+                            }
+                        }
+                        all.push(f);
+                        pos = q;
+                        continue 'coord;
+                    }
+                    // Sauter déterminants et adjectifs antéposés.
+                    if is_subject_det(&normalize(&qtok.text)) {
+                        continue;
+                    }
+                    let is_adj = morpho::lookup(&qtok.text)
+                        .iter()
+                        .any(|m| m.category == MorphCategory::Adjective);
+                    if is_adj {
+                        continue;
+                    }
+                    break 'coord;
+                }
+                break 'coord;
+            } else if is_subject_det(&peek_lower) {
+                // Déterminant avant le sujet déjà trouvé : continuer.
+                continue;
+            } else {
+                break; // ni "et" ni déterminant → pas de coordination
+            }
+        }
+        break;
     }
+
+    Some(merge_subject_features(&all))
 }
 
 impl AttributeAdjectiveAgreement {
@@ -289,25 +537,43 @@ impl AttributeAdjectiveAgreement {
                     continue;
                 }
 
-                // --- Sujet : reculer en sautant clitiques et adjectifs. ---
-                let Some((gender, number)) = find_subject(&lex, k, tags) else {
-                    continue;
-                };
-
-                // --- Attribut : avancer en sautant clitiques et adverbes. ---
+                // --- Attribut : avancer en sautant les adverbes d'intensité/
+                // négation (« très », « pas »…). On cherche l'attribut en
+                // premier afin de pouvoir, en cas d'échec de la recherche du
+                // sujet en arrière, lancer une recherche en avant (sujet
+                // postposé immédiatement après l'attribut).
                 let mut a = k + 1;
-                let mut steps = 0;
-                while a < lex.len()
-                    && steps < MAX_WINDOW
-                    && (is_clitic(&lex[a].1.text) || is_intensifier(&lex[a].1.text))
-                {
+                let mut attr_steps = 0;
+                while a < lex.len() && attr_steps < MAX_WINDOW && is_intensifier(&lex[a].1.text) {
                     a += 1;
-                    steps += 1;
+                    attr_steps += 1;
                 }
                 if a >= lex.len() {
                     continue;
                 }
                 let adj_token = lex[a].1;
+
+                // Garde POS : un attribut adjectival/participial n'est jamais
+                // étiqueté préposition, déterminant, pronom… Écarte les
+                // homographes (« sur » = préposition mais aussi adjectif au
+                // lexique : « elle est sur le côté » ne doit pas devenir « sure »).
+                if let Some(tags) = tags {
+                    if !is_attribute_tag(tags[lex[a].0].upos) {
+                        continue;
+                    }
+                }
+
+                // --- Sujet : d'abord en reculant depuis la copule (ordre
+                // direct), puis en avançant depuis l'attribut (sujet postposé)
+                // si la recherche arrière échoue.
+                // Exemple de sujet postposé : « Sous le vent sera déployée
+                // ma voile » → « sera » copule, « déployée » attribut, « ma
+                // voile » sujet postposé.
+                let Some((gender, number)) = find_subject(&lex, k, tags)
+                    .or_else(|| find_postposed_subject(&lex, a + 1, tags))
+                else {
+                    continue;
+                };
 
                 // L'attribut peut être un adjectif (« content ») ou un participe
                 // passé (« parti »), avec la copule « être » : « elle est parti »
@@ -521,13 +787,21 @@ mod tests {
     fn tagged_count(text: &str) -> usize {
         let tokens = tokenize(text);
         let tags = crate::pos::tag(&tokens);
-        AttributeAdjectiveAgreement.check_tagged(&tokens, &tags).len()
+        AttributeAdjectiveAgreement
+            .check_tagged(&tokens, &tags)
+            .len()
     }
 
     #[test]
     fn pos_path_still_corrects_real_mismatches() {
-        assert_eq!(tagged_first("elle est content").as_deref(), Some("contente"));
-        assert_eq!(tagged_first("ils sont content").as_deref(), Some("contents"));
+        assert_eq!(
+            tagged_first("elle est content").as_deref(),
+            Some("contente")
+        );
+        assert_eq!(
+            tagged_first("ils sont content").as_deref(),
+            Some("contents")
+        );
         assert_eq!(tagged_first("elle est parti").as_deref(), Some("partie"));
     }
 
@@ -547,6 +821,33 @@ mod tests {
     }
 
     #[test]
+    fn pos_path_preposition_attribute_is_ignored() {
+        // « sur » est aussi l'adjectif « acide » au lexique, mais ici c'est la
+        // préposition (étiquetée ADP) : « elle est sur le côté » ne doit pas
+        // devenir « sure ». Idem après « rester » (verbe attributif).
+        assert_eq!(tagged_count("elle est sur le côté"), 0);
+        assert_eq!(tagged_count("la table est sur le côté"), 0);
+        assert_eq!(tagged_count("elle reste sur ses gardes"), 0);
+        // Le vrai désaccord adjectival reste corrigé.
+        assert_eq!(
+            tagged_first("elle est content").as_deref(),
+            Some("contente")
+        );
+    }
+
+    #[test]
+    fn pos_path_predicate_noun_after_copula_is_ignored() {
+        // « sont la partie… » : « la » est un article introduisant un attribut
+        // **nominal**, pas le clitique objet « la ». « partie » (nom) ne doit pas
+        // être accordé comme le participe de « partir » (« parti »).
+        assert_eq!(
+            tagged_count("les données sont la partie la plus visible"),
+            0
+        );
+        assert_eq!(tagged_count("ce sont les meilleurs du groupe"), 0);
+    }
+
+    #[test]
     fn pos_path_present_participle_clause_is_not_subject() {
         // Bug historique : « père », objet du participe présent « fatiguant »,
         // n'est pas le sujet de « sont » → pas de fausse correction « fatigant »
@@ -555,5 +856,63 @@ mod tests {
             tagged_count("les filles fatiguant leur père sont fatigantes"),
             0
         );
+    }
+
+    // --- Sujet postposé (find_postposed_subject). ---
+
+    #[test]
+    fn postposed_subject_triggers_agreement() {
+        // Être au futur + participe + sujet postposé : « ma voile » est féminin,
+        // « déployé » (Masc Sg) doit devenir « déployée ».
+        assert_eq!(
+            tagged_first("Sous le vent sera déployé ma voile.").as_deref(),
+            Some("déployée")
+        );
+    }
+
+    #[test]
+    fn postposed_subject_already_correct_is_silent() {
+        // Déjà accordé.
+        assert_eq!(tagged_count("Sous le vent sera déployée ma voile."), 0);
+    }
+
+    // --- Sujets coordonnés (accord masculin-l'emporte). ---
+
+    #[test]
+    fn coordinated_masc_fem_gives_masc() {
+        // Genre mixte : le masculin l'emporte.
+        assert_eq!(
+            first("des géants et collines étaient prises").as_deref(),
+            Some("pris")
+        );
+        assert_eq!(
+            first("les cadres et les toiles étaient prêtes").as_deref(),
+            Some("prêts")
+        );
+    }
+
+    #[test]
+    fn coordinated_all_fem_stays_fem() {
+        // Tous féminins : le résultat reste féminin.
+        assert_eq!(count("les tables et les chaises étaient propres"), 0);
+    }
+
+    #[test]
+    fn coordinated_all_masc_stays_masc() {
+        // Tous masculins : pas d'erreur sur la forme masculine.
+        assert_eq!(count("les chats et les chiens étaient contents"), 0);
+    }
+
+    #[test]
+    fn coordinated_correct_form_is_silent() {
+        // Forme déjà correcte (masculin pluriel pour genre mixte) → silence.
+        assert_eq!(count("les géants et les collines étaient pris"), 0);
+    }
+
+    #[test]
+    fn single_subject_still_works() {
+        // La phase de coordination ne perturbe pas le cas à sujet unique.
+        assert_eq!(first("elle est content").as_deref(), Some("contente"));
+        assert_eq!(count("ils sont contents"), 0);
     }
 }
