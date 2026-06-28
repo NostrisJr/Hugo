@@ -21,12 +21,14 @@
 //! ```
 
 pub mod clause;
+pub mod dep;
 pub mod morpho;
 pub mod pos;
 pub mod rules;
 pub mod spelling;
 pub mod tokenizer;
 
+pub use dep::DepRel;
 pub use morpho::{Morph, MorphCategory, Number, Person};
 pub use pos::{Tagged, Upos};
 pub use rules::Rule;
@@ -183,7 +185,10 @@ impl Checker {
         let tokens = tokenizer::tokenize(text);
         // Désambiguïsation POS (CRF) : une étiquette unique par token, alignée
         // sur `tokens`. Calculée une seule fois et offerte à chaque règle.
-        let tags = pos::tag(&tokens);
+        let mut tags = pos::tag(&tokens);
+        // Analyse en dépendances : renseigne head + relation de chaque token,
+        // offrant aux règles la structure syntaxique de la phrase.
+        dep::parse(&tokens, &mut tags);
         let mut suggestions = Vec::new();
 
         // Appliquer les règles grammaticales et typographiques activées.

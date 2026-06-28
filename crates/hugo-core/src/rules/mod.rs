@@ -112,6 +112,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(elision::ElisionRule),
         // Phase 9 — confusions et homophones restants.
         Box::new(confusion::EtEstConfusion),
+        Box::new(confusion::DontDoncConfusion),
         Box::new(confusion::SaCaConfusion),
         Box::new(confusion::NiNyConfusion),
         Box::new(confusion::PresPreConfusion),
@@ -127,7 +128,6 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         // Phase 12 — apposition détachée avec sujet postposé.
         Box::new(detached_appositive::DetachedAppositive),
         // Phase 7 — typographie, ponctuation, espaces, nombres (déterministe).
-        Box::new(typography::EllipsisRule),
         Box::new(typography::PunctDoublingRule),
         Box::new(typography::SpacingRule),
         Box::new(typography::LigatureRule),

@@ -53,8 +53,23 @@ const INVERTED_PRONOUNS: &[&str] = &["il", "elle", "on", "ils", "elles", "je", "
 /// Vrai si le texte est un verbe impératif plausible (forme conjuguée 2ᵉ pers.
 /// sans sujet — on approche : verbe dont la morphologie admet une forme
 /// impérative). Repli morphologique utilisé par [`Rule::check`].
+///
+/// **Exclusion des infinitifs** : un token dont le lemme verbal est identique à
+/// lui-même (ex. « comprendre », « contrôler ») est un infinitif — jamais un
+/// impératif. On l'écarte pour éviter les faux positifs dus aux lectures
+/// parasites du Lefff (« comprendre » → 2ᵉ pers. pl., « contrôler » → lecture
+/// de « chuter »).
 fn looks_like_imperative(form: &str) -> bool {
+    let lower = form.to_lowercase();
     let morphs = morpho::lookup(form);
+    // Si une lecture est infinitive (lemme == forme), ce token ne peut pas être
+    // à l'impératif.
+    if morphs
+        .iter()
+        .any(|m| m.category == MorphCategory::Verb && m.lemma == lower)
+    {
+        return false;
+    }
     morphs.iter().any(|m| {
         m.category == MorphCategory::Verb
             && matches!(m.person, Some(Person::Second))
@@ -235,11 +250,12 @@ fn run(tokens: &[Token], tags: Option<&[Tagged]>) -> Vec<Suggestion> {
         }
 
         // --- impératif + pronom postposé ---
-        // On utilise toujours la vérification morphologique (`looks_like_imperative`)
-        // même quand les tags sont disponibles : le CRF étiquette VERB aussi bien
-        // l'indicatif que l'impératif (il ne distingue pas la personne). La
-        // morphologie détecte la 2ᵉ personne plus précisément, ce qui évite de
-        // confondre « patientaient » (3ᵉ pl. imparfait) avec un impératif.
+        // Deux gardes complémentaires :
+        // 1. CRF (quand disponible) : si le token n'est pas VERB/AUX, il ne peut
+        //    pas être un impératif — filtre les noms homographes (« équipes »
+        //    tagué NOUN) et les adverbes (« plus » tagué ADV).
+        // 2. Morphologie : `looks_like_imperative` exclut les infinitifs pour
+        //    filtrer les lectures parasites du Lefff.
         //
         // Garde : si le token précédent est un pronom **sujet** (explicite), le
         // verbe est à l'indicatif, pas à l'impératif (l'impératif n'a jamais de
@@ -263,7 +279,12 @@ fn run(tokens: &[Token], tags: Option<&[Tagged]>) -> Vec<Suggestion> {
             }
             Some(false) // autre token (ponctuation, mot non-sujet) → stopper
         }).unwrap_or(false);
-        if looks_like_imperative(&tok.text) && !preceded_by_subject {
+        // Garde CRF : avec tags, exiger que le token soit VERB/AUX.
+        let crf_allows_imperative = match tags {
+            Some(tags) => matches!(tags[i].upos, Upos::Verb | Upos::Aux),
+            None => true,
+        };
+        if crf_allows_imperative && looks_like_imperative(&tok.text) && !preceded_by_subject {
             if let Some(j) = next_word_idx(tokens, i) {
                 let next_lower = tokens[j].text.to_lowercase();
                 if POSTVERBAL_PRONOUNS.contains(&next_lower.as_str()) {
@@ -280,7 +301,23 @@ fn run(tokens: &[Token], tags: Option<&[Tagged]>) -> Vec<Suggestion> {
                                         && m.lemma == tokens[k].text.to_lowercase()
                                 })
                         });
-                    if has_space && !clitic_governs_inf {
+                    // Le candidat clitique est-il en réalité une PRÉPOSITION
+                    // (« en partie », « en charge ») et non le pronom clitique
+                    // (« vas-en ») ? Avec les tags, le POS tranche directement
+                    // (« en » étiqueté ADP) ; sans tags, repli morphologique
+                    // limité à « en » devant un nom.
+                    let candidate_is_preposition = match tags {
+                        Some(t) => matches!(t[j].upos, Upos::Adp),
+                        None => {
+                            next_lower == "en"
+                                && next_word_idx(tokens, j).map_or(false, |k| {
+                                    crate::morpho::lookup(&tokens[k].text)
+                                        .iter()
+                                        .any(|m| m.category == crate::morpho::MorphCategory::Noun)
+                                })
+                        }
+                    };
+                    if has_space && !clitic_governs_inf && !candidate_is_preposition {
                         let correction = format!("{}-{}", tok.text, tokens[j].text);
                         let span = Span::new(tok.span.start, tokens[j].span.end);
                         suggestions.push(Suggestion {
@@ -420,6 +457,14 @@ mod tests {
     fn no_false_inversion_through_punctuation() {
         // Ponctuation entre verbe et pronom → frontière de proposition.
         assert_eq!(count("Il lui dit : Je ne pense pas"), 0);
+    }
+
+    #[test]
+    fn no_false_imperative_on_preposition_en() {
+        // « précède en partie » : « en » est la préposition (étiquetée ADP par le
+        // CRF), pas le pronom clitique → pas de « précède-en ». Garde par le POS.
+        assert_eq!(count("L'identité précède en partie à la sécurité"), 0);
+        assert_eq!(count("Les équipes en charge des arrivants"), 0);
     }
 
     #[test]

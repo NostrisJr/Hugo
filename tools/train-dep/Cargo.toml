@@ -1,0 +1,19 @@
+[package]
+name = "train-dep"
+description = "Entraîne le parser de dépendances (arc-eager) de Hugo sur Universal Dependencies."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "train-dep"
+path = "src/main.rs"
+
+[dependencies]
+hugo-core = { workspace = true }
+
+[features]
+# Réutilise le système de transitions, l'extraction de traits et le
+# sérialiseur du runtime (cohérence entraînement/décodage).
+default = []

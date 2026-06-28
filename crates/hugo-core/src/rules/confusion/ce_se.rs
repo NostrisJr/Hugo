@@ -157,12 +157,12 @@ fn correction_word(
         // le réfléchi légitime (« il se livre »), pas le démonstratif.
         "se" => {
             if let Some(prev) = subject_before(sentence, i) {
-                let prev_is_subj =
-                    SUBJECT_PRONOUNS.contains(&normalize(sentence[prev].1.text.as_str()).as_str())
-                        || matches!(
-                            tags[sentence[prev].0].upos,
-                            Upos::Noun | Upos::Propn
-                        );
+                let prev_norm = normalize(sentence[prev].1.text.as_str());
+                let prev_is_subj = SUBJECT_PRONOUNS.contains(&prev_norm.as_str())
+                    // « qui » relatif sujet : « ce qui se passe », « l'homme qui se
+                    // lève » — le « se » qui suit est le réfléchi, pas le démonstratif.
+                    || prev_norm == "qui"
+                    || matches!(tags[sentence[prev].0].upos, Upos::Noun | Upos::Propn);
                 if prev_is_subj {
                     return None;
                 }
@@ -170,8 +170,15 @@ fn correction_word(
             let next = sentence.get(i + 1)?;
             let next_norm = normalize(next.1.text.as_str());
             let next_upos = upos(sentence, i + 1, tags);
+            // Repli nominal : un mot étiqueté VERB par le CRF mais homographe d'un
+            // nom (« Se dîner » → « Ce dîner »). On ne l'applique qu'à un mot SANS
+            // lecture verbale **finie** : un verbe conjugué (« se passe », « se
+            // marche ») est un réfléchi légitime, même s'il est homographe d'un nom
+            // (« une passe », « une marche »). Sans cette garde, on surchargeait le
+            // CRF et corrigeait à tort « ce qui se passe » en « ce ».
             let next_is_nominal = matches!(next_upos, Upos::Noun | Upos::Propn | Upos::Adj)
                 || (next_upos == Upos::Verb
+                    && !is_finite_verb(&next.1.text)
                     && morpho::lookup(&next.1.text)
                         .iter()
                         .any(|m| m.category == morpho::MorphCategory::Noun));
@@ -359,6 +366,10 @@ mod tests {
             "je pense que c'est juste", // « c'est » après « que »
             "Lui, c'est différent",     // virgule : pas de rattachement sujet
             "ce sont mes amis",         // « ce sont » (clitique non élidé)
+            "ce qui se passe",          // « se passe » réfléchi (homographe « une passe »)
+            "je sais ce qui se passe",  // idem en complétive
+            "l'homme qui se lève tôt",  // « qui » relatif sujet + réfléchi
+            "voici comment il se porte", // « se porte » (homographe « une porte »)
         ] {
             assert_eq!(count(ok), 0, "faux positif sur « {ok} »");
         }

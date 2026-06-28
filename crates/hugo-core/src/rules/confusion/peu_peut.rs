@@ -117,11 +117,20 @@ fn correction_peut(
     let next = sentence.get(i + 1).map(|(_, t)| normalize(&t.text));
 
     // Quantifieur / déterminant + peut/peux → peu (« un peut », « très peut »).
+    // Garde : un mot homographe d'un quantifieur mais tagué NOUN/PROPN (ex.
+    // « SI » → sigle pour Système d'Information) n'est pas un quantifieur.
     if prev
         .as_deref()
         .is_some_and(|p| QUANTIFIERS_BEFORE.contains(&p))
     {
-        return Some("peu");
+        let prev_is_nominal = i > 0
+            && matches!(
+                upos(sentence, i - 1, tags),
+                Upos::Noun | Upos::Propn
+            );
+        if !prev_is_nominal {
+            return Some("peu");
+        }
     }
 
     // avoir + peut/peux + « de » → peu (« il a peut de temps »). Le veto sur le

@@ -16,8 +16,9 @@
 //!   on s'abstient.
 
 use super::{lexical_sentences, Rule};
+use crate::dep::DepRel;
 use crate::morpho::{self, Gender, MorphCategory, Number};
-use crate::pos::Tagged;
+use crate::pos::{Tagged, Upos};
 use crate::tokenizer::Token;
 use crate::Suggestion;
 
@@ -145,6 +146,54 @@ fn subject_features(text: &str) -> Option<(Gender, Number)> {
     (gender != Gender::Epicene).then_some((gender, number))
 }
 
+/// À partir d'un participe passé passif et du genre/nombre de son **sujet**,
+/// renvoie la correction d'accord, ou `None` si déjà accordé / hors de portée.
+/// Partagé par le chemin positionnel (`check`) et le chemin par l'arbre.
+fn participle_suggestion(
+    part_token: &Token,
+    gender: Gender,
+    number: Number,
+    subj_text: &str,
+) -> Option<Suggestion> {
+    let parts = participles(&part_token.text);
+    let (lemma, already_agreed) = if !parts.is_empty() {
+        let agreed = parts
+            .iter()
+            .any(|m| m.gender == Some(gender) && m.number == Some(number));
+        let lemma = unique_lemma(&parts)?;
+        (lemma, agreed)
+    } else {
+        // Repli : forme conjuguée sans lecture PP ni adjectivale.
+        let all = morpho::lookup(&part_token.text);
+        let vlemmas: std::collections::HashSet<&str> = all
+            .iter()
+            .filter(|m| m.category == MorphCategory::Verb)
+            .map(|m| m.lemma.as_str())
+            .collect();
+        if vlemmas.len() != 1 {
+            return None;
+        }
+        (vlemmas.into_iter().next().unwrap().to_string(), false)
+    };
+
+    if already_agreed {
+        return None;
+    }
+    let corrected = morpho::participle(&lemma, gender, number)?;
+    if corrected.eq_ignore_ascii_case(&part_token.text) {
+        return None;
+    }
+    Some(Suggestion {
+        span: part_token.span,
+        message: format!(
+            "Accord du participe passé passif : « {} » doit s'accorder avec le sujet « {} ».",
+            part_token.text, subj_text
+        ),
+        replacements: vec![match_case(&part_token.text, &corrected)],
+        rule_id: RULE_ID,
+    })
+}
+
 impl Rule for PassiveParticiple {
     fn check(&self, tokens: &[Token]) -> Vec<Suggestion> {
         let mut suggestions = Vec::new();
@@ -180,59 +229,58 @@ impl Rule for PassiveParticiple {
                 let Some(&(_, part_token)) = lex.get(q) else {
                     continue;
                 };
-                let parts = participles(&part_token.text);
 
-                // Sujet : pour un GN (« le gâteau »), le nom tête est en a-1
-                // et le déterminant en a-2. On remonte depuis a-1.
+                // Sujet : pour un GN (« le gâteau »), le nom tête est en a-1.
                 let subj_cand = lex[a - 1].1;
                 let Some((gender, number)) = subject_features(&subj_cand.text) else {
                     continue;
                 };
 
-                let (lemma, already_agreed) = if !parts.is_empty() {
-                    let agreed = parts
-                        .iter()
-                        .any(|m| m.gender == Some(gender) && m.number == Some(number));
-                    let Some(l) = unique_lemma(&parts) else {
-                        continue;
-                    };
-                    (l, agreed)
-                } else {
-                    // Repli : forme conjuguée (ex. « écris ») sans lecture PP ni
-                    // adjectivale — on tente quand même si le lemme est unique.
-                    let all = morpho::lookup(&part_token.text);
-                    let vlemmas: std::collections::HashSet<&str> = all
-                        .iter()
-                        .filter(|m| m.category == MorphCategory::Verb)
-                        .map(|m| m.lemma.as_str())
-                        .collect();
-                    if vlemmas.len() != 1 {
-                        continue;
-                    }
-                    (vlemmas.into_iter().next().unwrap().to_string(), false)
-                };
-
-                if already_agreed {
-                    continue;
+                if let Some(s) =
+                    participle_suggestion(part_token, gender, number, &subj_cand.text)
+                {
+                    suggestions.push(s);
                 }
+            }
+        }
+        suggestions
+    }
 
-                let Some(corrected) = morpho::participle(&lemma, gender, number) else {
-                    continue;
-                };
-                if corrected.eq_ignore_ascii_case(&part_token.text) {
-                    continue;
-                }
-
-                suggestions.push(Suggestion {
-                    span: part_token.span,
-                    message: format!(
-                        "Accord du participe passé passif : « {} » doit s'accorder avec le \
-                         sujet « {} ».",
-                        part_token.text, subj_cand.text
-                    ),
-                    replacements: vec![match_case(&part_token.text, &corrected)],
-                    rule_id: RULE_ID,
-                });
+    /// Chemin de production : le sujet du participe passif est lu directement
+    /// dans l'arbre via `nsubj:pass` (ou `nsubj`), au lieu d'être deviné à la
+    /// position `aux − 1`. Indispensable quand le sujet est **éloigné** du verbe
+    /// (« Deux solutions visant à automatiser la migration ont été citées » : le
+    /// sujet est « solutions », pas « migration »).
+    fn check_tagged(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
+        let mut suggestions = Vec::new();
+        for p in 0..tokens.len() {
+            if tags[p].upos != Upos::Verb {
+                continue;
+            }
+            let kids = crate::dep::children(tags, p);
+            // Passif composé : auxiliaire passif « été » (aux:pass) + auxiliaire
+            // « avoir » (aux). On reste sur le passif composé pour ne pas
+            // empiéter sur la règle d'attribut (passif simple « est mangé »).
+            let has_passive_aux = kids.iter().any(|&c| tags[c].dep == DepRel::AuxPass);
+            if !has_passive_aux {
+                continue;
+            }
+            let has_avoir = kids
+                .iter()
+                .any(|&c| tags[c].dep == DepRel::Aux && is_avoir(&tokens[c].text));
+            if !has_avoir {
+                continue;
+            }
+            let Some(s_idx) = crate::dep::subject_of(tags, p) else {
+                continue;
+            };
+            let Some((gender, number)) = subject_features(&tokens[s_idx].text) else {
+                continue;
+            };
+            if let Some(s) =
+                participle_suggestion(&tokens[p], gender, number, &tokens[s_idx].text)
+            {
+                suggestions.push(s);
             }
         }
         suggestions
@@ -262,6 +310,44 @@ mod tests {
 
     fn count(text: &str) -> usize {
         PassiveParticiple.check(&tokenize(text)).len()
+    }
+
+    /// Chemin de production (POS + dépendances).
+    fn first_tagged(text: &str) -> Option<String> {
+        let tokens = tokenize(text);
+        let mut tags = crate::pos::tag(&tokens);
+        crate::dep::parse(&tokens, &mut tags);
+        PassiveParticiple
+            .check_tagged(&tokens, &tags)
+            .into_iter()
+            .next()
+            .and_then(|s| s.replacements.into_iter().next())
+    }
+
+    fn count_tagged(text: &str) -> usize {
+        let tokens = tokenize(text);
+        let mut tags = crate::pos::tag(&tokens);
+        crate::dep::parse(&tokens, &mut tags);
+        PassiveParticiple.check_tagged(&tokens, &tags).len()
+    }
+
+    #[test]
+    fn distant_subject_via_tree() {
+        // Sujet ÉLOIGNÉ du verbe (séparé par une proposition participiale) : le
+        // sujet est « solutions » (nsubj:pass), pas « migration » (le mot juste
+        // avant l'auxiliaire). Phrase correcte → silence (pas de faux positif).
+        assert_eq!(
+            count_tagged(
+                "Deux solutions visant à automatiser la migration ont été citées."
+            ),
+            0
+        );
+        // Vrai désaccord avec le sujet éloigné → corrigé vers le pluriel féminin.
+        assert_eq!(
+            first_tagged("Deux solutions visant à automatiser la migration ont été cité.")
+                .as_deref(),
+            Some("citées")
+        );
     }
 
     #[test]

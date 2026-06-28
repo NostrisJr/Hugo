@@ -24,10 +24,55 @@
 //! la fenêtre, on s'abstient (précision > rappel).
 
 use super::{lexical_sentences, Rule};
+use crate::dep;
 use crate::morpho::{self, Gender, Morph, MorphCategory, Number, Person};
 use crate::pos::{Tagged, Upos};
 use crate::tokenizer::Token;
 use crate::Suggestion;
+
+/// Sujet (index d'origine) d'un attribut selon l'arbre : `nsubj` de l'attribut
+/// lui-même (prédicat d'une copule), sinon `nsubj` de sa tête.
+fn tree_subject_for_attr(tags: &[Tagged], adj_orig: usize) -> Option<usize> {
+    if let Some(s) = dep::subject_of(tags, adj_orig) {
+        return Some(s);
+    }
+    let head = dep::head_of(tags, adj_orig)?;
+    dep::subject_of(tags, head)
+}
+
+/// Veto par l'arbre : vrai si l'attribut `adj_token` s'accorde **déjà** en genre
+/// et nombre avec son vrai sujet (`nsubj` de l'arbre). La détection
+/// positionnelle a alors visé le mauvais sujet (inversion, complément,
+/// apposition) → la suggestion serait un faux positif.
+fn attribute_agrees_with_tree_subject(
+    lex: &[(usize, &Token)],
+    tags: &[Tagged],
+    adj_orig: usize,
+    adj_token: &Token,
+) -> bool {
+    let Some(s_idx) = tree_subject_for_attr(tags, adj_orig) else {
+        return false;
+    };
+    // Sujet coordonné : l'arbre ne pointe qu'un conjoint (singulier) → ne pas
+    // voter, laisser la détection positionnelle gérer l'accord pluriel.
+    if dep::children(tags, s_idx)
+        .iter()
+        .any(|&c| tags[c].dep == crate::dep::DepRel::Conj)
+    {
+        return false;
+    }
+    let Some(s_tok) = lex.iter().find(|(o, _)| *o == s_idx).map(|(_, t)| *t) else {
+        return false;
+    };
+    let Some((g, n)) = pronoun_features(&s_tok.text).or_else(|| subject_features(s_tok)) else {
+        return false;
+    };
+    morpho::lookup(&adj_token.text).iter().any(|m| {
+        (m.category == MorphCategory::Adjective || is_participle(m))
+            && m.gender.map_or(true, |mg| mg == g || mg == Gender::Epicene)
+            && m.number.map_or(true, |mn| mn == n || mn == Number::Invariable)
+    })
+}
 
 /// Vérifie l'accord en genre et en nombre de l'adjectif attribut avec son sujet.
 pub struct AttributeAdjectiveAgreement;
@@ -505,7 +550,6 @@ fn find_subject(
                     }
                     break 'coord;
                 }
-                break 'coord;
             } else if is_subject_det(&peek_lower) {
                 // Déterminant avant le sujet déjà trouvé : continuer.
                 continue;
@@ -559,6 +603,13 @@ impl AttributeAdjectiveAgreement {
                 // lexique : « elle est sur le côté » ne doit pas devenir « sure »).
                 if let Some(tags) = tags {
                     if !is_attribute_tag(tags[lex[a].0].upos) {
+                        continue;
+                    }
+                    // Veto par l'arbre : si l'attribut s'accorde déjà avec son
+                    // vrai sujet (nsubj), la détection positionnelle a visé le
+                    // mauvais sujet → abstention (réduit les faux positifs sur
+                    // inversions, compléments et appositions).
+                    if attribute_agrees_with_tree_subject(&lex, tags, lex[a].0, adj_token) {
                         continue;
                     }
                 }
@@ -790,6 +841,28 @@ mod tests {
         AttributeAdjectiveAgreement
             .check_tagged(&tokens, &tags)
             .len()
+    }
+
+    /// Comptage avec étiquettes complètes (POS + dépendances) : active le veto.
+    fn count_full(text: &str) -> usize {
+        let tokens = tokenize(text);
+        let mut tags = crate::pos::tag(&tokens);
+        crate::dep::parse(&tokens, &mut tags);
+        AttributeAdjectiveAgreement.check_tagged(&tokens, &tags).len()
+    }
+
+    #[test]
+    fn tree_veto_suppresses_wrong_subject_attr() {
+        // « la salle était pleine » : « pleine » s'accorde avec « salle » (fém sg) ;
+        // la détection positionnelle visait « clients/habitués » (pl). Le veto par
+        // l'arbre (attribut accordé avec son nsubj) supprime le faux positif.
+        assert_eq!(
+            count_full("Les clients n'étaient que des habitués, et la salle était pleine."),
+            0
+        );
+        // Le veto ne masque pas une vraie faute : « Il » (nsubj, masc sg) ≠
+        // « formés » (masc pl) → toujours signalé.
+        assert_eq!(count_full("Il sont formés à vous arnaquer."), 1);
     }
 
     #[test]

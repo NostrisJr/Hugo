@@ -27,6 +27,7 @@
 //! on suggère la forme participiale.
 
 use super::Rule;
+use crate::morpho::{self, Gender, MorphCategory, Number};
 use crate::pos::{Tagged, Upos};
 use crate::rules::lexical_sentences;
 use crate::tokenizer::Token;
@@ -101,6 +102,54 @@ const COPULAS: &[&str] = &[
 
 pub struct AdjectifVerbalRule;
 
+/// Vrai si la forme adjectivale `adj_form` (position `i`) est suivi d'un nom
+/// étiqueté NOUN/PROPN par le CRF et que ce nom s'accorde avec elle. Ce motif
+/// « en ADJ NOM » (« en différents scénarios ») indique un SP, pas un gérondif.
+///
+/// Double garde : CRF pour exclure les homographes (« son » = Det ou Noun) +
+/// accord morphologique pour confirmer la cohérence adjectivale.
+fn adj_agrees_with_following_noun(
+    sentence: &[(usize, &Token)],
+    i: usize,
+    adj_form: &str,
+    tags: &[Tagged],
+) -> bool {
+    let Some(&(next_orig, next_tok)) = sentence.get(i + 1) else {
+        return false;
+    };
+    // Le mot suivant doit être un vrai NOM selon le CRF (pas DET, ADV…).
+    if !matches!(tags[next_orig].upos, Upos::Noun | Upos::Propn) {
+        return false;
+    }
+    let noun_readings: Vec<_> = morpho::lookup(&next_tok.text)
+        .into_iter()
+        .filter(|m| m.category == MorphCategory::Noun)
+        .collect();
+    if noun_readings.is_empty() {
+        return false;
+    }
+    let adj_readings: Vec<_> = morpho::lookup(adj_form)
+        .into_iter()
+        .filter(|m| m.category == MorphCategory::Adjective)
+        .collect();
+    if adj_readings.is_empty() {
+        return false;
+    }
+    adj_readings.iter().any(|adj| {
+        noun_readings.iter().any(|noun| {
+            let g_ok = match (adj.gender, noun.gender) {
+                (Some(ag), Some(ng)) => ag == ng || ag == Gender::Epicene || ng == Gender::Epicene,
+                _ => true,
+            };
+            let n_ok = match (adj.number, noun.number) {
+                (Some(an), Some(nn)) => an == nn || an == Number::Invariable || nn == Number::Invariable,
+                _ => true,
+            };
+            g_ok && n_ok
+        })
+    })
+}
+
 impl Rule for AdjectifVerbalRule {
     fn check(&self, tokens: &[Token]) -> Vec<Suggestion> {
         self.check_tagged(tokens, &crate::pos::tag(tokens))
@@ -151,13 +200,18 @@ impl Rule for AdjectifVerbalRule {
                     }
                 }
 
-                // --- adjectif verbal → participe présent (après « en ») ---
+                // --- adjectif verbal → participe présent (après « en » gérondif) ---
+                // « en » est soit le gérondif (suivi d'un participe présent) soit
+                // la préposition (suivi d'un adjectif qui modifie un nom suivant).
+                // Garde : si la forme adjectivale s'accorde en genre et nombre avec
+                // le nom qui lui est adjacent (ex. « différents scénarios » → Masc
+                // Pl = Masc Pl), c'est un SP, pas un gérondif.
                 if let Some(part_form) = participe_for_adj(&lower) {
                     let prev_is_en = i > 0 && {
                         let prev = sentence[i - 1].1.text.to_lowercase();
                         prev == "en"
                     };
-                    if prev_is_en {
+                    if prev_is_en && !adj_agrees_with_following_noun(&sentence, i, form, tags) {
                         let tok = sentence[i].1;
                         suggestions.push(Suggestion {
                             span: tok.span,

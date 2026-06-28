@@ -18,6 +18,10 @@ Cargo.lock.orig
 # Le header C (crates/hugo-ffi/include/hugo.h) est versionné : il sert de
 # référence d'API et se régénère avec cbindgen (voir crates/hugo-ffi/cbindgen.toml).
 
+# Claude Code (artefacts locaux, non versionnés)
+/.claude
+/memory
+
 # OS / éditeurs
 .DS_Store
 *.swp

@@ -33,6 +33,7 @@
 //! - Si la forme correcte est introuvable dans le lexique, on n'émet rien.
 
 use super::Rule;
+use crate::dep::DepRel;
 use crate::morpho::{self, Gender, Morph, MorphCategory, Number};
 use crate::pos::{Tagged, Upos};
 use crate::tokenizer::{Token, TokenKind};
@@ -282,6 +283,41 @@ fn is_comma(tok: &Token) -> bool {
     tok.kind == TokenKind::Punctuation && tok.text == ","
 }
 
+/// Vrai si le token `i` est enchâssé dans une **proposition subordonnée**
+/// adverbiale ou complétive plus profonde que la principale : un de ses
+/// gouverneurs (en **excluant** `i` lui-même) porte la relation `advcl`, `ccomp`
+/// ou `csubj`.
+///
+/// Remplace l'ancienne garde SCONJ positionnelle : un apposé enchâssé dans une
+/// subordonnée (« Si un SI peut sembler imbriqué, **perclus**…, … se dégagent » :
+/// perclus → imbriqué → sembler → peut[advcl]) ne doit pas s'accorder avec le
+/// sujet de la principale.
+///
+/// On exclut le token lui-même : un apposé détaché en tête de phrase est souvent
+/// étiqueté `advcl` de la **principale** (« Épuisé…, s'allongea la voyageuse »)
+/// tout en s'accordant légitimement avec le sujet (inversé) de cette principale.
+/// On ne classe pas non plus `acl` comme bloquant (proposition adjective d'un
+/// nom : « tapie sous un rocher »).
+fn in_subordinate_clause(tags: &[Tagged], i: usize) -> bool {
+    let mut cur = match crate::dep::head_of(tags, i) {
+        Some(h) => h,
+        None => return false,
+    };
+    for _ in 0..tags.len() {
+        if matches!(
+            tags[cur].dep,
+            DepRel::Advcl | DepRel::Ccomp | DepRel::Csubj
+        ) {
+            return true;
+        }
+        match crate::dep::head_of(tags, cur) {
+            Some(h) => cur = h,
+            None => break,
+        }
+    }
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Cœur de la règle
 // ---------------------------------------------------------------------------
@@ -320,13 +356,20 @@ impl DetachedAppositive {
             .collect();
 
         // Motif 1 : apposé entre deux virgules consécutives.
-        for w in commas.windows(2) {
-            let c1 = w[0];
-            let c2 = w[1];
+        for window in commas.windows(2) {
+            let c1 = window[0];
+            let c2 = window[1];
+
             let Some(app_idx) = (c1 + 1..c2).find(|&i| tokens[i].is_lexical()) else {
                 continue;
             };
             if !is_appositive_candidate(&tokens[app_idx], tags[app_idx].upos) {
+                continue;
+            }
+            // Garde subordonnée (par l'arbre) : un apposé enchâssé dans une
+            // proposition subordonnée n'accorde pas avec le sujet de la
+            // principale. Remplace l'ancienne garde SCONJ de surface.
+            if in_subordinate_clause(tags, app_idx) {
                 continue;
             }
             let sugg = Self::try_inverted(tokens, tags, app_idx, c2 + 1, end)
@@ -341,7 +384,16 @@ impl DetachedAppositive {
         // un pronom ou une préposition (ce n'est pas une apposition).
         if let Some(&first_comma) = commas.first() {
             if let Some(app_idx) = (start..first_comma).find(|&i| tokens[i].is_lexical()) {
-                if is_appositive_candidate(&tokens[app_idx], tags[app_idx].upos) {
+                // Une apposition détachée est non-finie : « Épuisé par le voyage, ».
+                // Si le segment avant la première virgule contient un verbe fini,
+                // c'est une proposition complète (« Tout cela les amusait beaucoup, »)
+                // avec son propre sujet — pas une apposition.
+                let segment_is_clause =
+                    find_finite_verb(tokens, tags, app_idx, first_comma).is_some();
+                if !segment_is_clause
+                    && is_appositive_candidate(&tokens[app_idx], tags[app_idx].upos)
+                    && !in_subordinate_clause(tags, app_idx)
+                {
                     let sugg =
                         Self::try_inverted(tokens, tags, app_idx, first_comma + 1, end)
                         .or_else(|| Self::try_direct(tokens, tags, app_idx, first_comma + 1, end));
@@ -410,6 +462,17 @@ impl DetachedAppositive {
     ) -> Option<Suggestion> {
         let verb_idx = find_finite_verb(tokens, tags, search_from, end)?;
         let subj_idx = find_preposed_subject(tokens, tags, search_from, verb_idx)?;
+
+        // Le sujet préposé doit former, avec l'apposé, une structure contiguë
+        // « [apposé], [sujet] [verbe] ». Une virgule entre l'apposé et le sujet
+        // signale que ce sujet appartient à une autre proposition :
+        // « …construite, prête, puis écrasée au sol, l'homme l'accusa… » — « homme »
+        // est le sujet de « accusa » (principale), pas de l'apposé « prête » (qui
+        // relève du prédicat de « machine » en amont).
+        if (search_from..subj_idx).any(|i| is_comma(&tokens[i])) {
+            return None;
+        }
+
         let (gender, number) = subject_gender_number(&tokens[subj_idx])?;
 
         if agrees(&tokens[app_idx], gender, number) {
@@ -463,7 +526,8 @@ mod tests {
 
     fn tagged_suggestions(text: &str) -> Vec<Suggestion> {
         let tokens = tokenize(text);
-        let tags = crate::pos::tag(&tokens);
+        let mut tags = crate::pos::tag(&tokens);
+        crate::dep::parse(&tokens, &mut tags);
         DetachedAppositive.check_tagged(&tokens, &tags)
     }
 
@@ -594,6 +658,49 @@ mod tests {
             )
             .as_deref(),
             Some("tapi")
+        );
+    }
+
+    #[test]
+    fn subordinate_clause_appositive_no_trigger() {
+        // « perclus » est enchâssé dans la subordonnée « Si un SI peut sembler
+        // imbriqué, perclus… » (gouverneur `advcl`) : il ne doit PAS s'accorder
+        // avec « catégories », sujet de la principale. C'est la STRUCTURE
+        // (chaîne de gouverneurs passant par advcl) qui l'écarte, plus une
+        // détection SCONJ de surface.
+        assert_eq!(
+            tagged_count(
+                "Si un SI peut sembler imbriqué, perclus de dépendances circulaires, \
+                 différentes catégories se dégagent."
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn sentence_initial_clause_not_appositive() {
+        // « Tout cela les amusait beaucoup, » est une proposition complète (verbe
+        // fini « amusait »), pas une apposition détachée. « Tout » ne doit pas
+        // s'accorder avec « ils ».
+        assert_eq!(
+            tagged_count(
+                "Tout cela les amusait beaucoup, mais ce qu'ils préféraient, c'était la baignoire."
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn enumerated_predicative_not_appositive_subject() {
+        // « prête » coordonne avec « construite » dans le prédicat de « machine » ;
+        // « homme » (sujet de « accusa », après une virgule) ne doit pas être pris
+        // pour le sujet de l'apposé.
+        assert_eq!(
+            tagged_count(
+                "Mais dès que la machine fut construite, prête, puis écrasée au sol, \
+                 l'homme l'accusa d'avoir mal fait son travail."
+            ),
+            0
         );
     }
 

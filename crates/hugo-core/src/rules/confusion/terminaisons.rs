@@ -229,7 +229,7 @@ fn governor_left(sentence: &[(usize, &Token)], i: usize) -> Option<usize> {
 
 /// Vrai si le jeton en position `g` gouverne un **infinitif** : préposition
 /// infinitive (avec garde sur « de ») ou semi-auxiliaire conjugué.
-fn is_infinitive_governor(sentence: &[(usize, &Token)], g: usize) -> bool {
+fn is_infinitive_governor(sentence: &[(usize, &Token)], g: usize, tags: &[Tagged]) -> bool {
     let gov = normalize(sentence[g].1.text.as_str());
 
     if INF_PREPOSITIONS.contains(&gov.as_str()) {
@@ -243,6 +243,14 @@ fn is_infinitive_governor(sentence: &[(usize, &Token)], g: usize) -> bool {
         return true;
     }
 
+    // Semi-auxiliaire conjugué. Le gouverneur doit en outre être **étiqueté
+    // VERB/AUX par le CRF** : des homographes (« puis » = forme rare de
+    // « pouvoir », mais ici conjonction « …, puis écrasée ») ont une lecture
+    // verbale au lexique sans en être une en contexte. Sans cette garde, « puis »
+    // ferait passer le participe coordonné « écrasée » pour un infinitif.
+    if !matches!(upos(sentence, g, tags), Upos::Verb | Upos::Aux) {
+        return false;
+    }
     let gov_text = sentence[g].1.text.as_str();
     is_finite_verb(gov_text)
         && morpho::verb_forms(gov_text)
@@ -360,7 +368,7 @@ fn correction(sentence: &[(usize, &Token)], i: usize, tags: &[Tagged]) -> Option
     }
 
     // 3. Préposition / semi-auxiliaire → infinitif (-er).
-    if is_infinitive_governor(sentence, g) {
+    if is_infinitive_governor(sentence, g, tags) {
         if surface == ErForm::Infinitive {
             return None;
         }
@@ -518,6 +526,10 @@ mod tests {
             "pendant toute la durée du film",
             "il défend la liberté de la pensée",
             "une montée raide vers le sommet",
+            // « puis » est ici la conjonction de coordination (CCONJ), pas la
+            // forme verbale rare de « pouvoir » : le participe coordonné « écrasée »
+            // ne doit pas devenir un infinitif.
+            "la machine fut construite, prête, puis écrasée au sol",
         ] {
             assert_eq!(count(ok), 0, "faux positif sur « {ok} »");
         }

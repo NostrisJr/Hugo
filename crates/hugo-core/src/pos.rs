@@ -21,6 +21,7 @@ use std::sync::OnceLock;
 
 use fst::Map as FstMap;
 
+use crate::dep::{DepRel, HEAD_UNSET};
 use crate::morpho::{self, MorphCategory};
 use crate::tokenizer::{Token, TokenKind};
 
@@ -175,6 +176,12 @@ pub struct Tagged {
     pub upos: Upos,
     /// Catégorie grossière correspondante (`upos.to_category()`).
     pub category: MorphCategory,
+    /// Index (dans le tableau de tokens) du **gouverneur** syntaxique, renseigné
+    /// par [`crate::dep::parse`]. La racine pointe sur elle-même (`head == i`).
+    /// Vaut [`HEAD_UNSET`] tant que l'analyse en dépendances n'a pas été lancée.
+    pub head: u32,
+    /// Relation de dépendance reliant le token à son gouverneur.
+    pub dep: DepRel,
 }
 
 impl Tagged {
@@ -182,6 +189,8 @@ impl Tagged {
         Tagged {
             upos,
             category: upos.to_category(),
+            head: HEAD_UNSET,
+            dep: DepRel::Dep,
         }
     }
 }
@@ -619,6 +628,17 @@ pub fn tag(tokens: &[Token]) -> Vec<Tagged> {
         }
     }
     result
+}
+
+/// Étiquette POS une séquence de **formes** brutes (déjà segmentée en phrase),
+/// sans passer par le tokenizer. Décode le CRF embarqué directement sur
+/// `forms`.
+///
+/// Sert à l'entraînement du parser de dépendances (`tools/train-dep`), qui doit
+/// produire ses traits sur les **mêmes** POS prédites qu'au runtime, et non sur
+/// les POS de référence du treebank (évite le décalage entraînement/décodage).
+pub fn tag_forms(forms: &[&str]) -> Vec<Upos> {
+    instance().viterbi(forms)
 }
 
 /// Somme des meilleurs scores Viterbi par phrase d'un texte tokenisé.

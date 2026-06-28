@@ -20,10 +20,11 @@
 //! Non traité : la direction « est → et » n'a pas de signal séparable fiable
 //! (« elle est grande et belle » — le « est » correct ressemble à une copule).
 
-use super::{is_past_participle, normalize, upos};
+use super::{is_past_participle, normalize};
+use crate::dep::DepRel;
 use crate::morpho::{self, MorphCategory, Number};
 use crate::pos::{Tagged, Upos};
-use crate::rules::{lexical_sentences, Rule};
+use crate::rules::Rule;
 use crate::tokenizer::Token;
 use crate::Suggestion;
 
@@ -43,18 +44,18 @@ fn is_attributive(form: &str) -> bool {
     is_past_participle(form)
 }
 
-/// Vrai si le jeton est un sujet singulier de 3ᵉ personne (pronom ou nom sg).
-fn is_singular_3rd_subject(sentence: &[(usize, &Token)], k: usize, tags: &[Tagged]) -> bool {
-    let form = normalize(sentence[k].1.text.as_str());
+/// Vrai si le jeton `idx` est un sujet singulier de 3ᵉ personne (pronom du jeu
+/// fermé, ou nom singulier). Version pilotée par l'arbre : pas de garde SP
+/// positionnelle — la coordination nom+nom est écartée en amont par la structure.
+fn is_sing_3rd_subject(tokens: &[Token], tags: &[Tagged], idx: usize) -> bool {
+    let form = normalize(tokens[idx].text.as_str());
     if SING_3P_PRONOUNS.contains(&form.as_str()) {
         return true;
     }
-    // Nom singulier étiqueté NOUN
-    if !matches!(upos(sentence, k, tags), Upos::Noun | Upos::Propn) {
+    if !matches!(tags[idx].upos, Upos::Noun | Upos::Propn) {
         return false;
     }
-    // Vérifier le nombre singulier dans le lexique
-    let morphs = morpho::lookup(sentence[k].1.text.as_str());
+    let morphs = morpho::lookup(tokens[idx].text.as_str());
     if morphs.is_empty() {
         return true; // inconnu → supposer singulier
     }
@@ -67,48 +68,67 @@ fn is_singular_3rd_subject(sentence: &[(usize, &Token)], k: usize, tags: &[Tagge
 
 impl Rule for EtEstConfusion {
     fn check(&self, tokens: &[Token]) -> Vec<Suggestion> {
-        self.check_tagged(tokens, &crate::pos::tag(tokens))
+        let mut tags = crate::pos::tag(tokens);
+        crate::dep::parse(tokens, &mut tags);
+        self.check_tagged(tokens, &tags)
     }
 
+    /// Détection pilotée par l'arbre : « et » est une conjonction de coordination
+    /// (`cc`) rattachée au **second conjoint** C2 ; le premier conjoint C1 est la
+    /// tête de C2 (relation `conj`). C'est une confusion avec « est » lorsque la
+    /// coordination relie un **sujet** (C1) à un **attribut** (C2) — donc deux
+    /// catégories **incompatibles**. Une coordination de même catégorie
+    /// (nom+nom « problème et état », verbe+verbe « mange et dort ») est une vraie
+    /// conjonction : on n'y touche pas. Plus besoin de garde SP positionnelle.
     fn check_tagged(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
         let mut suggestions = Vec::new();
-        for sentence in lexical_sentences(tokens) {
-            let len = sentence.len();
-            for i in 0..len {
-                if normalize(sentence[i].1.text.as_str()) != "et" {
-                    continue;
-                }
-                // Doit être précédé d'un sujet singulier de 3ᵉ pers.
-                if i == 0 {
-                    continue;
-                }
-                if !is_singular_3rd_subject(&sentence, i - 1, tags) {
-                    continue;
-                }
-                // Doit être suivi d'un attribut (adj/PP/nom sans article)
-                let Some((_, next_tok)) = sentence.get(i + 1) else {
-                    continue;
-                };
-                let next_upos = upos(&sentence, i + 1, tags);
-                let next_form = next_tok.text.as_str();
-                let attributive = matches!(next_upos, Upos::Adj)
-                    || is_attributive(next_form)
-                    || matches!(next_upos, Upos::Noun);
-                if !attributive {
-                    continue;
-                }
-                // Pas de coordination de noms/verbes multiples (virgule avant)
-                let tok = sentence[i].1;
-                suggestions.push(Suggestion {
-                    span: tok.span,
-                    message: format!(
-                        "Confusion «\u{a0}et\u{a0}»/«\u{a0}est\u{a0}» : «\u{a0}{}\u{a0}» est peut-être le verbe «\u{a0}être\u{a0}».",
-                        tok.text
-                    ),
-                    replacements: vec!["est".to_string()],
-                    rule_id: RULE_ID,
-                });
+        for i in 0..tokens.len() {
+            if !tokens[i].is_lexical() || normalize(tokens[i].text.as_str()) != "et" {
+                continue;
             }
+            if tags[i].dep != DepRel::Cc {
+                continue;
+            }
+            // Second conjoint C2 (tête du `cc`), premier conjoint C1 (tête `conj`).
+            let Some(c2) = crate::dep::head_of(tags, i) else {
+                continue;
+            };
+            if tags[c2].dep != DepRel::Conj {
+                continue;
+            }
+            let Some(c1) = crate::dep::head_of(tags, c2) else {
+                continue;
+            };
+            // Ordre attendu : C1 … et … C2.
+            if !(c1 < i && i < c2) {
+                continue;
+            }
+            // C1 doit être un sujet singulier de 3ᵉ personne.
+            if !is_sing_3rd_subject(tokens, tags, c1) {
+                continue;
+            }
+            // Coordination de deux nominaux → vraie conjonction (« problème et
+            // état ») : on s'abstient. C'est la structure qui remplace la garde SP.
+            if matches!(tags[c1].upos, Upos::Noun | Upos::Propn)
+                && matches!(tags[c2].upos, Upos::Noun | Upos::Propn)
+            {
+                continue;
+            }
+            // C2 doit être un attribut : adjectif (POS) ou participe passé / adjectif
+            // (lexique). Exclut « mange et dort » (C2 verbe non attributif).
+            if !(matches!(tags[c2].upos, Upos::Adj) || is_attributive(&tokens[c2].text)) {
+                continue;
+            }
+
+            suggestions.push(Suggestion {
+                span: tokens[i].span,
+                message: format!(
+                    "Confusion «\u{a0}et\u{a0}»/«\u{a0}est\u{a0}» : «\u{a0}{}\u{a0}» est peut-être le verbe «\u{a0}être\u{a0}».",
+                    tokens[i].text
+                ),
+                replacements: vec!["est".to_string()],
+                rule_id: RULE_ID,
+            });
         }
         suggestions
     }
@@ -127,9 +147,15 @@ mod tests {
     use super::*;
     use crate::tokenizer::tokenize;
 
+    fn full_tags(tokens: &[Token]) -> Vec<Tagged> {
+        let mut tags = crate::pos::tag(tokens);
+        crate::dep::parse(tokens, &mut tags);
+        tags
+    }
+
     fn first(text: &str) -> Option<String> {
         let tokens = tokenize(text);
-        let tags = crate::pos::tag(&tokens);
+        let tags = full_tags(&tokens);
         EtEstConfusion
             .check_tagged(&tokens, &tags)
             .into_iter()
@@ -139,7 +165,7 @@ mod tests {
 
     fn count(text: &str) -> usize {
         let tokens = tokenize(text);
-        let tags = crate::pos::tag(&tokens);
+        let tags = full_tags(&tokens);
         EtEstConfusion.check_tagged(&tokens, &tags).len()
     }
 
@@ -169,5 +195,14 @@ mod tests {
     fn no_false_positive_plural() {
         // Sujet pluriel : ne pas toucher
         assert_eq!(count("ils et contents"), 0);
+    }
+
+    #[test]
+    fn no_false_positive_noun_coordination() {
+        // Coordination de deux noms : « et » relie « problème » et « état » (deux
+        // nominaux) → vraie conjonction, jamais le verbe. C'est la STRUCTURE
+        // (conj nom+nom) qui l'écarte, plus une liste de prépositions.
+        assert_eq!(count("Compréhension du problème et état de l'art"), 0);
+        assert_eq!(count("la santé et la sécurité"), 0);
     }
 }

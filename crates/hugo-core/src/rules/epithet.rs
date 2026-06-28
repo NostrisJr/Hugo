@@ -18,7 +18,7 @@
 use super::{is_number_invariable, lexical_sentences, Rule};
 use crate::morpho::{self, Gender, Morph, MorphCategory, Number};
 use crate::pos::{Tagged, Upos};
-use crate::tokenizer::Token;
+use crate::tokenizer::{Token, TokenKind};
 use crate::Suggestion;
 
 /// Vérifie l'accord en genre et en nombre de l'adjectif épithète avec son nom.
@@ -104,6 +104,20 @@ fn is_finite_verb(token: &Token) -> bool {
     !morpho::verb_forms(&token.text).is_empty()
 }
 
+/// Vrai si une virgule sépare les tokens à l'index `a` et `b` dans la tranche
+/// d'origine. Utilisée pour empêcher l'accord d'un adjectif avec un nom qui
+/// se trouve de l'autre côté d'une virgule (listes nominales en apposition).
+fn comma_between(tokens: &[Token], orig_a: usize, orig_b: usize) -> bool {
+    let (lo, hi) = if orig_a < orig_b {
+        (orig_a + 1, orig_b)
+    } else {
+        (orig_b + 1, orig_a)
+    };
+    tokens[lo..hi]
+        .iter()
+        .any(|t| t.kind == TokenKind::Punctuation && t.text == ",")
+}
+
 /// Calque la casse initiale de `original` sur `replacement`.
 fn match_case(original: &str, replacement: &str) -> String {
     if !original.chars().next().is_some_and(|c| c.is_uppercase()) {
@@ -114,6 +128,99 @@ fn match_case(original: &str, replacement: &str) -> String {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => replacement.to_string(),
     }
+}
+
+/// Vrai si l'une des analyses adjectivales de `adj_token` s'accorde (genre connu
+/// + nombre) avec `noun_token`. Sert à détecter les rattachements ambigus :
+/// si l'adjectif s'accorde avec un **autre** nom du groupe nominal que sa tête
+/// `amod`, la correction n'est pas sûre.
+fn adj_agrees_with_token(adj_token: &Token, noun_token: &Token) -> bool {
+    let adjs: Vec<_> = morpho::lookup(&adj_token.text)
+        .into_iter()
+        .filter(|m| m.category == MorphCategory::Adjective)
+        .collect();
+    if adjs.is_empty() {
+        return false;
+    }
+    let nouns: Vec<_> = morpho::lookup(&noun_token.text)
+        .into_iter()
+        .filter(|m| m.category == MorphCategory::Noun)
+        .collect();
+    let Some(number) = consensus(nouns.iter().map(|m| m.number)) else {
+        return false;
+    };
+    let gender = consensus(nouns.iter().map(|m| m.gender)).filter(|g| *g != Gender::Epicene);
+    adj_agrees(&adjs, gender, number)
+}
+
+/// À partir d'un adjectif et de son **nom tête**, renvoie la correction d'accord
+/// nécessaire, ou `None` si l'accord est correct, ambigu (lemme ou genre/nombre
+/// indéterminé) ou hors de portée. Partagé par le chemin d'adjacence (sans tags)
+/// et le chemin piloté par l'arbre de dépendances (`amod`).
+fn agreement_suggestion(adj_token: &Token, noun_token: &Token) -> Option<Suggestion> {
+    // L'adjectif ne doit pas être un homographe verbal conjugué.
+    if is_finite_verb(adj_token) {
+        return None;
+    }
+    let adjectives: Vec<_> = morpho::lookup(&adj_token.text)
+        .into_iter()
+        .filter(|m| m.category == MorphCategory::Adjective)
+        .collect();
+    if adjectives.is_empty() {
+        return None;
+    }
+
+    let nouns: Vec<_> = morpho::lookup(&noun_token.text)
+        .into_iter()
+        .filter(|m| m.category == MorphCategory::Noun)
+        .collect();
+    let noun_gender = consensus(nouns.iter().map(|m| m.gender));
+    // Nom **invariable en nombre** (« fois », « prix ») : on garde le nombre de
+    // l'adjectif ; sinon on prend celui du nom (abstention si indéterminé).
+    let number = if is_number_invariable(&nouns) {
+        consensus(adjectives.iter().map(|m| m.number))?
+    } else {
+        consensus(nouns.iter().map(|m| m.number))?
+    };
+
+    // Genre cible : celui du nom s'il est connu, sinon celui de l'adjectif.
+    let adj_gender = consensus(adjectives.iter().map(|m| m.gender));
+    let gender = noun_gender.or(adj_gender)?;
+    if gender == Gender::Epicene {
+        return None;
+    }
+
+    // Déjà accordé ? (une analyse compatible suffit)
+    let agrees = adjectives.iter().any(|m| {
+        m.gender.map_or(true, |g| g == gender || g == Gender::Epicene)
+            && m.number.map_or(true, |n| n == number || n == Number::Invariable)
+    });
+    if agrees {
+        return None;
+    }
+
+    // Lemme unique (sinon ambiguïté lexicale).
+    let mut lemmas: Vec<&str> = adjectives.iter().map(|m| m.lemma.as_str()).collect();
+    lemmas.sort_unstable();
+    lemmas.dedup();
+    if lemmas.len() != 1 {
+        return None;
+    }
+    let lemma = adjectives[0].lemma.clone();
+
+    let corrected = morpho::decline(&lemma, gender, number)?;
+    if corrected.eq_ignore_ascii_case(&adj_token.text) {
+        return None;
+    }
+    Some(Suggestion {
+        span: adj_token.span,
+        message: format!(
+            "Accord de l'adjectif : « {} » ne s'accorde pas avec « {} ».",
+            adj_token.text, noun_token.text
+        ),
+        replacements: vec![match_case(&adj_token.text, &corrected)],
+        rule_id: RULE_ID,
+    })
 }
 
 impl EpithetAdjectiveAgreement {
@@ -170,8 +277,15 @@ impl EpithetAdjectiveAgreement {
                     &["tout", "toute", "tous", "toutes", "aucun", "aucune", "nul", "nulle",
                       "chaque", "quelque", "quelques", "certain", "certaine", "certains",
                       "certaines", "plusieurs", "même", "mêmes", "autre", "autres"];
+                // Une virgule entre l'adjectif et le candidat nom coupe le lien
+                // d'accord : « applications tierces, processus » → « tierces »
+                // s'accorde avec « applications », pas avec « processus ».
                 let noun_pos =
-                    if a + 1 < lex.len() && is_noun(lex[a + 1].1) && noun_ok(lex[a + 1].0) {
+                    if a + 1 < lex.len()
+                        && is_noun(lex[a + 1].1)
+                        && noun_ok(lex[a + 1].0)
+                        && !comma_between(tokens, lex[a].0, lex[a + 1].0)
+                    {
                         a + 1
                     } else if PREDETERMINERS.contains(&adj_token.text.to_lowercase().as_str())
                         && a + 2 < lex.len()
@@ -180,9 +294,14 @@ impl EpithetAdjectiveAgreement {
                             .any(|m| m.category == MorphCategory::Determiner)
                         && is_noun(lex[a + 2].1)
                         && noun_ok(lex[a + 2].0)
+                        && !comma_between(tokens, lex[a].0, lex[a + 2].0)
                     {
                         a + 2
-                    } else if a > 0 && is_noun(lex[a - 1].1) && noun_ok(lex[a - 1].0) {
+                    } else if a > 0
+                        && is_noun(lex[a - 1].1)
+                        && noun_ok(lex[a - 1].0)
+                        && !comma_between(tokens, lex[a - 1].0, lex[a].0)
+                    {
                         a - 1
                     } else {
                         continue;
@@ -224,76 +343,74 @@ impl EpithetAdjectiveAgreement {
                     }
                 }
 
-                let nouns: Vec<_> = morpho::lookup(&noun_token.text)
-                    .into_iter()
-                    .filter(|m| m.category == MorphCategory::Noun)
-                    .collect();
-                let noun_gender = consensus(nouns.iter().map(|m| m.gender));
-                // Nom **invariable en nombre** (« fois », « fils », « prix ») : sa
-                // forme vaut singulier comme pluriel. On ne corrige donc pas le
-                // nombre de l'adjectif — on garde le sien (« la première fois »,
-                // « un autre fils » sont corrects) ; seul le genre est vérifié.
-                let number = if is_number_invariable(&nouns) {
-                    match consensus(adjectives.iter().map(|m| m.number)) {
-                        Some(n) => n,
-                        None => continue, // nombre de l'adjectif ambigu → abstention
-                    }
-                } else {
-                    match consensus(nouns.iter().map(|m| m.number)) {
-                        Some(n) => n,
-                        None => continue, // nombre du nom indéterminé → on s'abstient
-                    }
-                };
-
-                // Genre cible : celui du nom s'il est connu, sinon on préserve
-                // celui de l'adjectif (correction de nombre seule).
-                let adj_gender = consensus(adjectives.iter().map(|m| m.gender));
-                let Some(gender) = noun_gender.or(adj_gender) else {
-                    continue;
-                };
-                if gender == Gender::Epicene {
-                    continue;
+                if let Some(s) = agreement_suggestion(adj_token, noun_token) {
+                    suggestions.push(s);
                 }
-
-                // Déjà accordé ? (une analyse compatible suffit)
-                let agrees = adjectives.iter().any(|m| {
-                    m.gender
-                        .map_or(true, |g| g == gender || g == Gender::Epicene)
-                        && m.number
-                            .map_or(true, |n| n == number || n == Number::Invariable)
-                });
-                if agrees {
-                    continue;
-                }
-
-                // Lemme unique (sinon ambiguïté lexicale).
-                let mut lemmas: Vec<&str> = adjectives.iter().map(|m| m.lemma.as_str()).collect();
-                lemmas.sort_unstable();
-                lemmas.dedup();
-                if lemmas.len() != 1 {
-                    continue;
-                }
-                let lemma = adjectives[0].lemma.clone();
-
-                let Some(corrected) = morpho::decline(&lemma, gender, number) else {
-                    continue;
-                };
-                if corrected.eq_ignore_ascii_case(&adj_token.text) {
-                    continue;
-                }
-
-                suggestions.push(Suggestion {
-                    span: adj_token.span,
-                    message: format!(
-                        "Accord de l'adjectif : « {} » ne s'accorde pas avec « {} ».",
-                        adj_token.text, noun_token.text
-                    ),
-                    replacements: vec![match_case(&adj_token.text, &corrected)],
-                    rule_id: RULE_ID,
-                });
             }
         }
 
+        suggestions
+    }
+
+    /// Variante **pilotée par l'arbre de dépendances** (chemin de production).
+    ///
+    /// L'adjectif épithète est relié à son nom tête par la relation `amod` : le
+    /// parser l'a déjà rattaché au bon nom, **par-delà** les virgules d'une
+    /// énumération (« applications tierces, processus métiers ») et les
+    /// compléments « de N » (« outils de travail professionnels »). Plus besoin
+    /// d'heuristiques d'adjacence, de `comma_between`, ni de remontée de chaîne :
+    /// on lit la structure. On exige tout de même la confirmation morphologique
+    /// du désaccord (double garde arc + morphologie) pour rester robuste aux
+    /// erreurs du parser.
+    fn run_tree(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
+        let mut suggestions = Vec::new();
+        for i in 0..tokens.len() {
+            if !tokens[i].is_lexical() || tags[i].upos != Upos::Adj {
+                continue;
+            }
+            // Tête nominale via l'arc `amod` (None si l'adjectif n'est pas épithète).
+            let Some(h) = crate::dep::modified_noun(tags, i) else {
+                continue;
+            };
+            if !matches!(tags[h].upos, Upos::Noun | Upos::Propn) {
+                continue;
+            }
+            // Attachement ambigu « N1 de N2 ADJ » : si un **autre nom** s'intercale
+            // entre l'adjectif et sa tête `amod`, le rattachement n'est pas sûr
+            // (« un sac de pommes verte » : sac ? pommes ?). On s'abstient
+            // (précision > rappel) — remplace l'ancienne remontée de chaîne « de N ».
+            let (lo, hi) = (i.min(h), i.max(h));
+            let intervening_noun =
+                ((lo + 1)..hi).any(|k| matches!(tags[k].upos, Upos::Noun | Upos::Propn));
+            if intervening_noun {
+                continue;
+            }
+
+            // Rattachement « N1 de N2 ADJ » où le parser a accroché l'adjectif à
+            // N2 (adjacent) alors qu'il qualifie peut-être N1 (« les moyens de
+            // transport publics » : publics ~ moyens, pas transport). Si
+            // l'adjectif s'accorde avec un **nom ancêtre** de sa tête, le
+            // rattachement est ambigu → abstention.
+            let mut ancestor = crate::dep::head_of(tags, h);
+            let mut ambiguous = false;
+            for _ in 0..tags.len() {
+                let Some(a) = ancestor else { break };
+                if matches!(tags[a].upos, Upos::Noun | Upos::Propn)
+                    && adj_agrees_with_token(&tokens[i], &tokens[a])
+                {
+                    ambiguous = true;
+                    break;
+                }
+                ancestor = crate::dep::head_of(tags, a);
+            }
+            if ambiguous {
+                continue;
+            }
+
+            if let Some(s) = agreement_suggestion(&tokens[i], &tokens[h]) {
+                suggestions.push(s);
+            }
+        }
         suggestions
     }
 }
@@ -306,11 +423,7 @@ impl Rule for EpithetAdjectiveAgreement {
     }
 
     fn check_tagged(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
-        self.run(
-            tokens,
-            |idx| tags[idx].upos == Upos::Adj,
-            |idx| matches!(tags[idx].upos, Upos::Noun | Upos::Propn),
-        )
+        self.run_tree(tokens, tags)
     }
 
     fn name(&self) -> &'static str {
@@ -339,17 +452,24 @@ mod tests {
         EpithetAdjectiveAgreement.check(&tokenize(text)).len()
     }
 
-    /// Comptage via le chemin POS (`check_tagged`), tel qu'utilisé en production.
+    /// Étiquettes complètes (POS + dépendances) comme en production.
+    fn full_tags(tokens: &[crate::tokenizer::Token]) -> Vec<crate::pos::Tagged> {
+        let mut tags = crate::pos::tag(tokens);
+        crate::dep::parse(tokens, &mut tags);
+        tags
+    }
+
+    /// Comptage via le chemin taggé (`check_tagged`), tel qu'utilisé en production.
     fn count_tagged(text: &str) -> usize {
         let tokens = tokenize(text);
-        let tags = crate::pos::tag(&tokens);
+        let tags = full_tags(&tokens);
         EpithetAdjectiveAgreement.check_tagged(&tokens, &tags).len()
     }
 
-    /// Première suggestion via le chemin POS (`check_tagged`).
+    /// Première suggestion via le chemin taggé (`check_tagged`).
     fn first_tagged(text: &str) -> Option<String> {
         let tokens = tokenize(text);
-        let tags = crate::pos::tag(&tokens);
+        let tags = full_tags(&tokens);
         EpithetAdjectiveAgreement
             .check_tagged(&tokens, &tags)
             .into_iter()
@@ -436,13 +556,25 @@ mod tests {
             count_tagged("les outils de travail de nuit professionnels"),
             0
         );
-        // Le complément ne masque pas un vrai désaccord avec le nom proche :
-        // « verte » ne s'accorde ni avec « sac » (m. sg.) ni avec « pommes »
-        // → corrigé vers le nom tête adjacent « pommes ».
+        // Attachement « N1 de N2 ADJ » authentiquement ambigu : le parser
+        // rattache « verte » à « sac » (un sac vert), un nom s'intercale
+        // (« pommes ») → on s'abstient au lieu de risquer une correction vers le
+        // mauvais nom. Précision > rappel.
+        assert_eq!(count_tagged("un sac de pommes verte"), 0);
+    }
+
+    #[test]
+    fn enumeration_with_commas_no_false_positive() {
+        // Énumération nominale séparée par des virgules : chaque adjectif
+        // s'accorde avec SON nom (« tierces » ~ « applications », « légales » ~
+        // « contraintes »), jamais avec le nom voisin de l'autre côté de la
+        // virgule. L'arbre (`amod`) le sait — plus de faux positif, sans recourir
+        // à une heuristique de virgule.
         assert_eq!(
-            first_tagged("un sac de pommes verte").as_deref(),
-            Some("vertes")
+            count_tagged("Les applications tierces, processus métiers, contraintes légales"),
+            0
         );
+        assert_eq!(count_tagged("des données fiables, traitements rapides"), 0);
     }
 
     #[test]

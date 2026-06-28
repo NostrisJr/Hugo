@@ -41,6 +41,7 @@
 use std::collections::HashSet;
 
 use super::{lexical_sentences, Rule};
+use crate::dep::{self, DepRel};
 use crate::morpho::{self, MoodTense, MorphCategory, Number, Person};
 use crate::pos::{Tagged, Upos};
 use crate::tokenizer::Token;
@@ -694,6 +695,104 @@ fn generate_er_form(infinitive: &str, mt: MoodTense, person: Person, number: Num
 /// `tags` est la tranche des étiquettes POS (alignée sur les tokens d'origine).
 /// Quand elle est fournie, un repli par suffixe du 1ᵉʳ groupe est tenté pour
 /// les verbes absents du Lefff mais étiquetés `VERB`/`AUX` par le CRF.
+/// Token lexical d'index d'origine `orig` dans la phrase, le cas échéant.
+fn token_by_orig<'a>(sentence: &'a [(usize, &'a Token)], orig: usize) -> Option<&'a Token> {
+    sentence.iter().find(|(o, _)| *o == orig).map(|(_, t)| *t)
+}
+
+/// Nombre d'un nom sujet (index d'origine `orig`) : consensus des lectures
+/// nominales du lexique, sinon nombre d'un déterminant **enfant** dans l'arbre.
+fn noun_number_tree(sentence: &[(usize, &Token)], tags: &[Tagged], orig: usize) -> Option<Number> {
+    let tok = token_by_orig(sentence, orig)?;
+    let mut num: Option<Number> = None;
+    for m in morpho::lookup(&tok.text)
+        .iter()
+        .filter(|m| m.category == MorphCategory::Noun)
+    {
+        if let Some(n) = m.number {
+            if n == Number::Invariable {
+                continue;
+            }
+            match num {
+                None => num = Some(n),
+                Some(p) if p == n => {}
+                Some(_) => return None, // contradiction
+            }
+        }
+    }
+    if num.is_some() {
+        return num;
+    }
+    for c in dep::children(tags, orig) {
+        if tags[c].dep == DepRel::Det {
+            if let Some(t) = token_by_orig(sentence, c) {
+                if let Some(n) = determiner_number(&t.text) {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Personne et nombre d'un token **sujet** (index d'origine `orig`) : pronom du
+/// jeu fermé, ou nom/nom propre (3ᵉ personne + nombre du nom).
+fn subject_pn(sentence: &[(usize, &Token)], tags: &[Tagged], orig: usize) -> Option<(Person, Number)> {
+    let tok = token_by_orig(sentence, orig)?;
+    if let Some(pn) = subject_pronoun(&tok.text) {
+        return Some(pn);
+    }
+    if matches!(tags[orig].upos, Upos::Noun | Upos::Propn) {
+        return Some((Person::Third, noun_number_tree(sentence, tags, orig)?));
+    }
+    None
+}
+
+/// Index d'origine du **sujet** du verbe `v` selon l'arbre de dépendances.
+///
+/// Cherche un enfant `nsubj`/`nsubj:pass`/`csubj` de `v`. Si `v` est une copule
+/// ou un auxiliaire (le sujet est alors porté par le **prédicat**, tête de `v`),
+/// on cherche le sujet sur cette tête (« la salle **était** pleine » : le sujet
+/// `salle` est `nsubj` de `pleine`, pas de la copule `était »).
+fn tree_subject_idx(tags: &[Tagged], v: usize) -> Option<usize> {
+    if let Some(s) = dep::subject_of(tags, v) {
+        return Some(s);
+    }
+    if matches!(tags[v].dep, DepRel::Cop | DepRel::Aux | DepRel::AuxPass) {
+        let head = dep::head_of(tags, v)?;
+        return dep::subject_of(tags, head);
+    }
+    None
+}
+
+/// Veto par l'arbre : vrai si le verbe d'index d'origine `v` **s'accorde déjà**
+/// avec son vrai sujet (le `nsubj` de l'arbre). Dans ce cas, une suggestion
+/// d'accord serait un faux positif — la détection positionnelle a confondu le
+/// sujet avec un objet, un complément ou un membre d'apposition.
+///
+/// Renvoie `false` si le sujet ou son nombre est indéterminé (pas de veto) :
+/// double garde — on n'abstient que si l'arbre **confirme** l'accord.
+fn verb_agrees_with_tree_subject(sentence: &[(usize, &Token)], tags: &[Tagged], v: usize, verb_text: &str) -> bool {
+    let Some(s_idx) = tree_subject_idx(tags, v) else {
+        return false;
+    };
+    // Sujet coordonné (« Pierre et Marie ») : l'arbre ne pointe qu'un conjoint
+    // (singulier), mais le sujet réel est pluriel. On ne vote pas — la détection
+    // de sujet coordonné (`detect_coordinated`) doit pouvoir agir.
+    if dep::children(tags, s_idx)
+        .iter()
+        .any(|&c| tags[c].dep == DepRel::Conj)
+    {
+        return false;
+    }
+    let Some((sp, sn)) = subject_pn(sentence, tags, s_idx) else {
+        return false;
+    };
+    morpho::verb_forms(verb_text)
+        .iter()
+        .any(|vf| vf.mood_tense != MoodTense::Imperative && vf.person == sp && vf.number == sn)
+}
+
 fn agree_at(
     sentence: &[(usize, &Token)],
     k: usize,
@@ -703,6 +802,17 @@ fn agree_at(
     tags: Option<&[Tagged]>,
 ) -> Option<Suggestion> {
     let verb_token = sentence.get(k)?.1;
+
+    // Veto par l'arbre de dépendances : si le verbe s'accorde déjà avec son
+    // **vrai** sujet (nsubj de l'arbre), la détection positionnelle a visé le
+    // mauvais sujet → on s'abstient (réduction des faux positifs sur inversions,
+    // appositions et compléments).
+    if let Some(tags) = tags {
+        let v = sentence[k].0;
+        if verb_agrees_with_tree_subject(sentence, tags, v, &verb_token.text) {
+            return None;
+        }
+    }
 
     // Chemin Lefff : formes verbales finies, hors impératif.
     let finite: Vec<_> = morpho::verb_forms(&verb_token.text)
@@ -831,6 +941,12 @@ impl SubjectVerbAgreement {
                 }
             }
         }
+
+        // NB : un « override » par l'arbre (3ᵉ passe flaggant tout verbe dont le
+        // `nsubj` désaccorde) a été tenté puis RETIRÉ : à 89 % UAS, les
+        // attachements `nsubj` erronés triplaient les faux positifs (SVA 8 → 29
+        // sur corpus correct). L'arbre sert donc uniquement de **veto** (précision),
+        // pas de détecteur positif (cf. `verb_agrees_with_tree_subject`).
 
         // Dédoublonnage par verbe (un verbe n'a qu'un accord).
         let mut seen = HashSet::new();
@@ -1176,6 +1292,30 @@ mod tests {
             .iter()
             .filter(|s| s.rule_id == "subject_verb_agreement")
             .count()
+    }
+
+    /// Comptage avec étiquettes **complètes** (POS + dépendances), comme en
+    /// production : seul ce chemin active le veto par l'arbre.
+    fn sva_count_full(text: &str) -> usize {
+        let tokens = tokenize(text);
+        let mut tags = crate::pos::tag(&tokens);
+        crate::dep::parse(&tokens, &mut tags);
+        SubjectVerbAgreement
+            .check_tagged(&tokens, &tags)
+            .iter()
+            .filter(|s| s.rule_id == "subject_verb_agreement")
+            .count()
+    }
+
+    #[test]
+    fn tree_veto_does_not_hide_real_errors() {
+        // Garde-fou : le veto par l'arbre (réduction des faux positifs, validée
+        // sur corpus : SVA 13→8) ne doit PAS supprimer une vraie faute d'accord,
+        // car le verbe n'y est précisément PAS accordé avec son nsubj.
+        // « nous » (1pl) ≠ « bougeront » (3pl).
+        assert_eq!(sva_count_full("Mais nous ne bougeront pas."), 1);
+        // « je » (1sg) ≠ « retournes » (2sg).
+        assert_eq!(sva_count_full("Je retournes souvent au marché."), 1);
     }
 
     #[test]
