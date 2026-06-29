@@ -372,6 +372,15 @@ impl DetachedAppositive {
             if in_subordinate_clause(tags, app_idx) {
                 continue;
             }
+            // Garde « proposition antérieure » : si une proposition **finie**
+            // précède l'apposé dans la phrase (« Si un SI peut sembler imbriqué,
+            // perclus…, … se dégagent »), l'apposé prolonge cette proposition et
+            // ne s'accorde pas avec le sujet qui suit. Une amorce non finie
+            // (groupe prépositionnel « Dans la brume…, ») ne bloque pas. Robuste
+            // à la variation d'arbre (le parser peut enraciner l'apposé lui-même).
+            if find_finite_verb(tokens, tags, start, c1).is_some() {
+                continue;
+            }
             let sugg = Self::try_inverted(tokens, tags, app_idx, c2 + 1, end)
                 .or_else(|| Self::try_direct(tokens, tags, app_idx, c2 + 1, end));
             if let Some(sugg) = sugg {

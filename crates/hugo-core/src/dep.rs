@@ -328,6 +328,10 @@ pub struct State<'a> {
     /// Enfant le plus à gauche / à droite de chaque nœud (traits structurels).
     pub leftmost: Vec<usize>,
     pub rightmost: Vec<usize>,
+    /// Nombre d'enfants à gauche / à droite de chaque nœud (valence — trait
+    /// structurel à la Zhang & Nivre 2011).
+    pub lvalency: Vec<u16>,
+    pub rvalency: Vec<u16>,
 }
 
 /// Marqueur « pas de tête / pas d'enfant ».
@@ -347,6 +351,8 @@ impl<'a> State<'a> {
             deps: vec![DepRel::Dep; n],
             leftmost: vec![NONE; n + 1],
             rightmost: vec![NONE; n + 1],
+            lvalency: vec![0; n + 1],
+            rvalency: vec![0; n + 1],
         }
     }
 
@@ -386,6 +392,11 @@ impl<'a> State<'a> {
         }
         if self.rightmost[head] == NONE || child > self.rightmost[head] {
             self.rightmost[head] = child;
+        }
+        if child < head {
+            self.lvalency[head] += 1;
+        } else {
+            self.rvalency[head] += 1;
         }
     }
 
@@ -510,6 +521,69 @@ pub fn transition_features(state: &State, out: &mut Vec<String>) {
             _ => "6+",
         };
         out.push(format!("dist={bucket}|{}|{}", p(s0), p(b0)));
+    }
+
+    // Petits-enfants (3ᵉ ordre) : enfant extrême de l'enfant extrême. Capte les
+    // structures profondes (p. ex. tête réelle d'un sujet enchâssé).
+    let gc = |id: usize| {
+        if id != NONE && id != state.n {
+            (state.leftmost[id], state.rightmost[id])
+        } else {
+            (NONE, NONE)
+        }
+    };
+    let (s0ll, _) = gc(s0l);
+    let (_, s0rr) = gc(s0r);
+    let (b0ll, _) = gc(b0l);
+    for (tag, id) in [("s0ll", s0ll), ("s0rr", s0rr), ("b0ll", b0ll)] {
+        out.push(format!("{tag}.p={}", p(id)));
+    }
+    out.push(format!("s0.s0l.s0ll.p={}|{}|{}", p(s0), p(s0l), p(s0ll)));
+    out.push(format!("s0.s0r.s0rr.p={}|{}|{}", p(s0), p(s0r), p(s0rr)));
+
+    // Tête déjà attribuée à s0 (arc-eager : s0 peut être gouverné avant d'être
+    // dépilé) — informe le choix Reduce vs LeftArc.
+    let s0h = if s0 != NONE && s0 != state.n && state.heads[s0] != NONE {
+        state.heads[s0]
+    } else {
+        NONE
+    };
+    out.push(format!("s0h.p={}", p(s0h)));
+    out.push(format!("s0h.s0.b0.p={}|{}|{}", p(s0h), p(s0), p(b0)));
+
+    // Valence : nombre d'enfants gauche/droite (capé) de s0 et b0, croisé au POS.
+    let val = |id: usize, left: bool| -> u16 {
+        if id == NONE || id == state.n {
+            return 0;
+        }
+        let v = if left {
+            state.lvalency[id]
+        } else {
+            state.rvalency[id]
+        };
+        v.min(3)
+    };
+    out.push(format!("s0.vl={}|{}", val(s0, true), p(s0)));
+    out.push(format!("s0.vr={}|{}", val(s0, false), p(s0)));
+    out.push(format!("b0.vl={}|{}", val(b0, true), p(b0)));
+
+    // Suffixes (2 et 3 derniers caractères) de s0 et b0 : robustesse aux mots
+    // hors-lexique (morphologie flexionnelle française : -ent, -ait, -ées…).
+    let suf = |id: usize, k: usize| -> String {
+        if id == NONE || id == state.n {
+            return "<NULL>".to_string();
+        }
+        let w = lw(id);
+        let cs: Vec<char> = w.chars().collect();
+        if cs.len() <= k {
+            w
+        } else {
+            cs[cs.len() - k..].iter().collect()
+        }
+    };
+    for (tag, id) in [("s0", s0), ("b0", b0)] {
+        out.push(format!("{tag}.suf2={}", suf(id, 2)));
+        out.push(format!("{tag}.suf3={}", suf(id, 3)));
     }
 }
 

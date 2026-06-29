@@ -89,14 +89,22 @@ impl Rule for EtEstConfusion {
             if tags[i].dep != DepRel::Cc {
                 continue;
             }
-            // Second conjoint C2 (tête du `cc`), premier conjoint C1 (tête `conj`).
+            // C2 = tête du `cc` (le mot juste après « et »). Deux lectures
+            // équivalentes du même motif fautif « sujet + et + attribut » :
+            //  - **coordination** : C2 porte `conj`, et C1 est sa tête (le parser
+            //    coordonne le sujet et l'attribut) ;
+            //  - **sujet-verbe** : le parser lit l'attribut comme un verbe-racine
+            //    portant un sujet (« il --nsubj--> parti(root) ») ; C1 = ce sujet.
+            // Robuste aux deux structures que le parser peut produire.
             let Some(c2) = crate::dep::head_of(tags, i) else {
                 continue;
             };
-            if tags[c2].dep != DepRel::Conj {
-                continue;
-            }
-            let Some(c1) = crate::dep::head_of(tags, c2) else {
+            let c1 = if tags[c2].dep == DepRel::Conj {
+                crate::dep::head_of(tags, c2)
+            } else {
+                crate::dep::subject_of(tags, c2)
+            };
+            let Some(c1) = c1 else {
                 continue;
             };
             // Ordre attendu : C1 … et … C2.
