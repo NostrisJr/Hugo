@@ -317,7 +317,18 @@ fn run(tokens: &[Token], tags: Option<&[Tagged]>) -> Vec<Suggestion> {
                                 })
                         }
                     };
-                    if has_space && !clitic_governs_inf && !candidate_is_preposition {
+                    // Le candidat (« la »/« les »/« le ») est-il en réalité un
+                    // DÉTERMINANT (« arrête la lecture ») et non un pronom objet
+                    // (« arrête-la ») ? L'arc `det` de l'arbre tranche directement.
+                    let candidate_is_determiner = match tags {
+                        Some(t) => t[j].dep == crate::dep::DepRel::Det,
+                        None => false,
+                    };
+                    if has_space
+                        && !clitic_governs_inf
+                        && !candidate_is_preposition
+                        && !candidate_is_determiner
+                    {
                         let correction = format!("{}-{}", tok.text, tokens[j].text);
                         let span = Span::new(tok.span.start, tokens[j].span.end);
                         suggestions.push(Suggestion {

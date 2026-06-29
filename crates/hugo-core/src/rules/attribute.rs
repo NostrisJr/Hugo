@@ -581,6 +581,18 @@ impl AttributeAdjectiveAgreement {
                     continue;
                 }
 
+                // Sujet disjonctif « ni … ni … » : l'attribut/le participe peut
+                // s'accorder au singulier OU au pluriel (« ni l'un ni l'autre ne
+                // sont/n'est venu(s) »). On s'abstient dès deux « ni » avant la copule.
+                if lex[..k]
+                    .iter()
+                    .filter(|(_, t)| normalize(&t.text) == "ni")
+                    .count()
+                    >= 2
+                {
+                    continue;
+                }
+
                 // --- Attribut : avancer en sautant les adverbes d'intensité/
                 // négation (« très », « pas »…). On cherche l'attribut en
                 // premier afin de pouvoir, en cas d'échec de la recherche du

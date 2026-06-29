@@ -64,6 +64,42 @@ fn is_etre(text: &str) -> bool {
     morpho::verb_forms(text).iter().any(|v| v.lemma == "être")
 }
 
+/// Verbes **essentiellement transitifs indirects** (construction « à quelqu'un »)
+/// ou intransitifs : leur pronom réfléchi est un **objet indirect**, donc le
+/// participe reste **invariable** (« ils se sont parlé », « elles se sont
+/// succédé », « ils se sont plu »). Liste curée d'après la Banque de dépannage
+/// linguistique / Projet Voltaire — pas un accord avec le sujet.
+const INDIRECT_REFLEXIVE_VERBS: &[&str] = &[
+    "parler",
+    "plaire",
+    "complaire",
+    "déplaire",
+    "succéder",
+    "nuire",
+    "mentir",
+    "ressembler",
+    "sourire",
+    "rire",
+    "suffire",
+    "survivre",
+    "convenir",
+    "téléphoner",
+    "écrire",
+    "répondre",
+    "obéir",
+    "désobéir",
+    "appartenir",
+];
+
+/// Vrai si le participe (par son lemme verbal) appartient à un verbe dont le
+/// réfléchi est indirect → participe invariable, accord à ne pas proposer.
+fn is_indirect_reflexive(text: &str) -> bool {
+    morpho::lookup(text)
+        .iter()
+        .filter(|m| m.category == MorphCategory::Verb)
+        .any(|m| INDIRECT_REFLEXIVE_VERBS.contains(&m.lemma.as_str()))
+}
+
 /// Vrai si le jeton est un pronom réfléchi objet préverbal.
 fn is_reflexive(text: &str) -> bool {
     matches!(
@@ -142,6 +178,10 @@ impl PronominalParticiple {
     /// genre/nombre donnés, ou `None` si déjà accordé / lemme ambigu / forme
     /// introuvable. Partagé par les chemins positionnel et arbre.
     fn suggest(part_token: &Token, gender: Gender, number: Number) -> Option<Suggestion> {
+        // Verbe à réfléchi indirect (« se parler » = parler à) : invariable.
+        if is_indirect_reflexive(&part_token.text) {
+            return None;
+        }
         let parts = participles(&part_token.text);
         if parts.is_empty() {
             return None;
@@ -248,6 +288,12 @@ impl PronominalParticiple {
             let Some(subj) = crate::dep::subject_of(tags, p) else {
                 continue;
             };
+            // Sujet coordonné (« l'homme et la femme se sont rencontrés ») : la
+            // tête ne porte qu'un conjoint singulier ; le vrai sujet est pluriel.
+            // On s'abstient (le genre/nombre composé n'est pas calculé ici).
+            if crate::dep::child_with(tags, subj, &[DepRel::Conj]).is_some() {
+                continue;
+            }
             let Some((gender, number)) = subject_features(&tokens[subj]) else {
                 continue;
             };

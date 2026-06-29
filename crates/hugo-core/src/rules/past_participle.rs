@@ -437,33 +437,59 @@ impl PastParticipleAvoir {
                 continue;
             }
 
-            // COD = enfant `obj` **antéposé** du participe.
-            let Some(obj) = crate::dep::child_with(tags, p, &[DepRel::Obj]) else {
-                continue;
-            };
-            if obj >= p {
-                continue; // COD postposé → pas d'accord avec « avoir ».
+            // Objet direct du participe. Postposé (à droite) → pas d'accord avec
+            // « avoir » (« j'ai mangé une pomme »), on s'abstient.
+            let obj = crate::dep::child_with(tags, p, &[DepRel::Obj]);
+            if let Some(o) = obj {
+                if o > p {
+                    continue;
+                }
             }
 
-            // Genre/nombre du COD selon sa nature.
+            // Genre/nombre du COD antéposé selon sa nature.
             let (gender, number, antecedent): (Option<Gender>, Number, Option<usize>) =
-                if let Some((g, n)) = cod_features(&tokens[obj].text) {
-                    (g, n, None) // clitique « la »/« les »
-                } else if matches!(normalize(&tokens[obj].text).as_str(), "que" | "qu") {
-                    let Some(ant) = antecedent_before(tokens, tags, obj) else {
+                if let Some(obj) = obj {
+                    // COD antéposé explicite : clitique, relatif « que », ou nom.
+                    if let Some((g, n)) = cod_features(&tokens[obj].text) {
+                        (g, n, None) // clitique « la »/« les »
+                    } else if matches!(normalize(&tokens[obj].text).as_str(), "que" | "qu") {
+                        let Some(ant) = antecedent_before(tokens, tags, obj) else {
+                            continue;
+                        };
+                        let Some((g, n)) = noun_features(&tokens[ant].text) else {
+                            continue;
+                        };
+                        (Some(g), n, Some(ant))
+                    } else if matches!(tags[obj].upos, Upos::Noun | Upos::Propn) {
+                        let Some((g, n)) = noun_features(&tokens[obj].text) else {
+                            continue;
+                        };
+                        (Some(g), n, Some(obj))
+                    } else {
+                        continue; // « l' », « me », « te »… : genre indéterminé.
+                    }
+                } else if matches!(tags[p].dep, DepRel::Acl | DepRel::AclRelcl) {
+                    // Repli : sur l'homographe fini (« que tu as écris »), le
+                    // parser n'étiquette pas « que » en `obj`, mais rattache le
+                    // participe au nom antécédent par `acl`/`acl:relcl`. On exige
+                    // un relatif « que/qu' » devant le participe.
+                    let Some(h) = crate::dep::head_of(tags, p) else {
                         continue;
                     };
-                    let Some((g, n)) = noun_features(&tokens[ant].text) else {
+                    if h >= p || !matches!(tags[h].upos, Upos::Noun | Upos::Propn) {
+                        continue;
+                    }
+                    if !(h + 1..p)
+                        .any(|j| matches!(normalize(&tokens[j].text).as_str(), "que" | "qu"))
+                    {
+                        continue;
+                    }
+                    let Some((g, n)) = noun_features(&tokens[h].text) else {
                         continue;
                     };
-                    (Some(g), n, Some(ant))
-                } else if matches!(tags[obj].upos, Upos::Noun | Upos::Propn) {
-                    let Some((g, n)) = noun_features(&tokens[obj].text) else {
-                        continue;
-                    };
-                    (Some(g), n, Some(obj))
+                    (Some(g), n, Some(h))
                 } else {
-                    continue; // « l' », « me », « te »… : genre indéterminé.
+                    continue;
                 };
 
             let msg = match antecedent {

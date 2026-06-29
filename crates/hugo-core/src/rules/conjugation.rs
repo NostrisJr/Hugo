@@ -803,6 +803,18 @@ fn agree_at(
 ) -> Option<Suggestion> {
     let verb_token = sentence.get(k)?.1;
 
+    // Sujet disjonctif « ni … ni … » : le verbe peut légitimement être au
+    // singulier OU au pluriel (« ni l'un ni l'autre ne sont/n'est venu »). On
+    // s'abstient dès qu'au moins deux « ni » précèdent le verbe.
+    if sentence[..k]
+        .iter()
+        .filter(|(_, t)| normalize(&t.text) == "ni")
+        .count()
+        >= 2
+    {
+        return None;
+    }
+
     // Veto par l'arbre de dépendances : si le verbe s'accorde déjà avec son
     // **vrai** sujet (nsubj de l'arbre), la détection positionnelle a visé le
     // mauvais sujet → on s'abstient (réduction des faux positifs sur inversions,

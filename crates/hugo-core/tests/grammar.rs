@@ -26,6 +26,27 @@ const GRAMMAR_RULES: &[&str] = &[
     "confusion_terminaison",
     "past_participle_avoir",
     "passive_participle",
+    // Couverture élargie (corpus littéraire / dictées) : toutes les règles
+    // grammaticales, pour que les phrases correctes ne tolèrent aucun faux
+    // positif quelle qu'en soit la règle (typographie/capitalisation exclues).
+    "pronominal_participle",
+    "confusion_et_est",
+    "confusion_sa_ca",
+    "confusion_dans_den",
+    "confusion_pres_pret",
+    "confusion_plutot",
+    "confusion_accents",
+    "confusion_dont_donc",
+    "confusion_ni_ny",
+    "special_agreement",
+    "locutions_accord",
+    "adjectif_verbal",
+    "demi_accord",
+    "numeraux",
+    "subjunctive",
+    "detached_appositive",
+    "trait_union",
+    "imperatif_groupe1",
 ];
 
 /// Suggestions grammaticales d'un texte (orthographe/capitalisation exclues).
@@ -103,6 +124,22 @@ const INCORRECT: &[(&str, &str, &str)] = &[
     ("les décisions qu'on a prit", "past_participle_avoir", "prises"),
     // Voix passive.
     ("la lettre a été écris", "passive_participle", "écrite"),
+    // --- Corpus « dictées » : phrases plus longues et naturelles, fautes
+    // classiques (anti-overfit : le contexte étendu ne doit pas masquer l'erreur).
+    ("Les fleurs que j'ai cueilli sont fanées.", "past_participle_avoir", "cueillies"),
+    ("La lettre que tu as écris est sur la table.", "past_participle_avoir", "écrite"),
+    ("Les oiseaux chante dans les arbres.", "subject_verb_agreement", "chantent"),
+    ("Mes amis sont venu hier soir.", "attribute_adjective_agreement", "venus"),
+    ("Elle est venu nous voir.", "attribute_adjective_agreement", "venue"),
+    ("Il ce promène tous les matins.", "confusion_ce_se", "se"),
+    ("La chanson quelle écoute me plaît.", "confusion_quel", "qu'elle"),
+    ("Quand à moi, je préfère rester ici.", "confusion_quand", "Quant"),
+    ("Il va a la maison.", "confusion_a_a", "à"),
+    ("Ils on oublié leurs clés.", "homophone", "ont"),
+    ("Les petit enfants dorment.", "epithet_adjective_agreement", "petits"),
+    ("Une grande maisons se dresse au loin.", "epithet_adjective_agreement", "grandes"),
+    ("Tout les jours il se lève tôt.", "tout_agreement", "Tous"),
+    ("vous parler trop fort.", "confusion_terminaison", "parlez"),
 ];
 
 /// Phrases correctes : aucune suggestion grammaticale ne doit apparaître.
@@ -194,6 +231,39 @@ const CORRECT: &[&str] = &[
     "les données sont la partie la plus visible",
     // Terminaison : nom homographe d'un verbe après déterminant/préposition :
     "il faut enrichir la base de données",
+    // --- Anti-overfit : prose littéraire (Victor Hugo) et phrases de dictée
+    // correctes mais difficiles. Aucune ne doit déclencher de règle grammaticale.
+    // Victor Hugo (vers et prose).
+    "Demain, dès l'aube, à l'heure où blanchit la campagne, je partirai.",
+    "Je marcherai les yeux fixés sur mes pensées, sans rien voir au dehors.",
+    "Elle était déchaussée, elle était décoiffée.",
+    "Lorsque l'enfant paraît, le cercle de famille applaudit à grands cris.",
+    "Ô combien de marins, combien de capitaines sont partis joyeux pour des courses lointaines.",
+    "Waterloo, Waterloo, Waterloo, morne plaine.",
+    "Un homme passait sur la route, un homme inconnu.",
+    "Les misérables avançaient lentement dans la nuit profonde.",
+    "Il y avait dans cette maison une vieille femme et un enfant.",
+    "Le soleil se couchait derrière les collines lointaines.",
+    "Cosette regardait les étoiles avec ses grands yeux étonnés.",
+    "Les soldats fatigués marchaient encore malgré la pluie battante.",
+    // Dictées : accords corrects et difficiles (participes, pronominaux, locutions).
+    "Les fleurs que j'ai cueillies sont déjà fanées.",
+    "La lettre que tu as écrite est restée sur la table.",
+    "Les efforts qu'elle a fournis ont fini par payer.",
+    "Les robes qu'elles ont achetées leur plaisent beaucoup.",
+    "Elle s'est lavé les mains avant de passer à table.",
+    "Elle s'est lavée puis elle est sortie.",
+    "Ils se sont parlé pendant des heures.",
+    "Les années que nous avons passées ici furent heureuses.",
+    "Quels livres passionnants tu as lus cet été !",
+    "Tout le monde est arrivé à l'heure ce matin.",
+    "Les enfants jouaient pendant que leurs parents discutaient.",
+    "Beaucoup de gens pensent que demain sera meilleur.",
+    "Ni l'un ni l'autre ne sont venus.",
+    "Quand il fait beau, nous allons nous promener au bord de la mer.",
+    "Plus tôt elle partira, plus tôt elle arrivera.",
+    "Ces vieilles maisons aux volets bleus bordent la rivière.",
+    "Le vieil homme et la jeune femme se sont rencontrés au marché.",
 ];
 
 #[test]
