@@ -13,6 +13,7 @@
 //! « le chats » → « les ».
 
 use super::{is_number_invariable, lexical_tokens, Rule};
+use crate::dep::DepRel;
 use crate::morpho::{self, Gender, MorphCategory, Number};
 use crate::pos::{Tagged, Upos};
 use crate::tokenizer::Token;
@@ -256,6 +257,13 @@ impl Rule for DeterminerNounAgreement {
         suggestions
     }
 
+    /// Chemin **piloté par l'arbre** (production), **hybride**. Le nom tête est
+    /// trouvé en priorité par l'arc `det` (par-delà **tout** nombre d'adjectifs
+    /// antéposés, sans borne ni balayage) ; mais sur les fragments courts
+    /// agrammaticaux le CRF mé-étiquette parfois les déterminants contractés
+    /// (« aux »→ADJ, « au »→NUM), faussant l'arc. On **replie** alors sur le
+    /// balayage POS (sauter les adjectifs jusqu'au nom). La garde pronom objet
+    /// (« je les ferme ») reste assurée par l'étiquette `PRON`.
     fn check_tagged(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
         let lex = lexical_tokens(tokens);
         let mut suggestions = Vec::new();
@@ -266,32 +274,35 @@ impl Rule for DeterminerNounAgreement {
             let Some(det) = classify(&det_lower) else {
                 continue;
             };
-            // Garde POS : un « le »/« la »/« les »/« des » étiqueté pronom est un
-            // pronom objet devant un verbe (« je les ferme »), pas un déterminant.
+            // Pronom objet homographe (« je les ferme ») : pas un déterminant.
             if tags[det_idx].upos == Upos::Pron {
                 continue;
             }
 
-            // Tête nominale : premier jeton étiqueté nom, en sautant les
-            // adjectifs antéposés (étiquetés `ADJ`) — robuste aux homographes,
-            // car c'est l'étiquette POS, non une heuristique de lookahead, qui
-            // tranche « douce/vieux/principales » entre nom et adjectif.
-            let mut head: Option<&Token> = None;
-            let mut steps = 0;
-            let mut k = i + 1;
-            while k < lex.len() && steps <= MAX_PRENOMINAL {
-                match tags[lex[k].0].upos {
-                    Upos::Adj => {
-                        k += 1;
-                        steps += 1;
-                    }
-                    Upos::Noun | Upos::Propn => {
-                        head = Some(lex[k].1);
-                        break;
-                    }
-                    _ => break,
-                }
+            // Nom tête : d'abord par l'arc `det` (robuste, sans borne) ;
+            // sinon balayage POS des adjectifs antéposés (repli mé-étiquetage).
+            let head: Option<&Token> = if tags[det_idx].dep == DepRel::Det {
+                crate::dep::head_of(tags, det_idx)
+                    .filter(|&h| h > det_idx && matches!(tags[h].upos, Upos::Noun | Upos::Propn))
+                    .map(|h| &tokens[h])
+            } else {
+                None
             }
+            .or_else(|| {
+                let mut steps = 0;
+                let mut k = i + 1;
+                while k < lex.len() && steps <= MAX_PRENOMINAL {
+                    match tags[lex[k].0].upos {
+                        Upos::Adj => {
+                            k += 1;
+                            steps += 1;
+                        }
+                        Upos::Noun | Upos::Propn => return Some(lex[k].1),
+                        _ => break,
+                    }
+                }
+                None
+            });
 
             let Some(noun) = head else { continue };
             if let Some(s) = agree(det_token, &det, noun) {
@@ -446,20 +457,23 @@ mod tests {
 
     // --- Chemin POS (`check_tagged`). ---
 
-    fn tagged_first(text: &str) -> Option<String> {
+    /// Tags de production : POS + arbre de dépendances (lu par `check_tagged`).
+    fn tagged(text: &str) -> Vec<Suggestion> {
         let tokens = tokenize(text);
-        let tags = crate::pos::tag(&tokens);
-        DeterminerNounAgreement
-            .check_tagged(&tokens, &tags)
+        let mut tags = crate::pos::tag(&tokens);
+        crate::dep::parse(&tokens, &mut tags);
+        DeterminerNounAgreement.check_tagged(&tokens, &tags)
+    }
+
+    fn tagged_first(text: &str) -> Option<String> {
+        tagged(text)
             .into_iter()
             .next()
             .and_then(|s| s.replacements.into_iter().next())
     }
 
     fn tagged_count(text: &str) -> usize {
-        let tokens = tokenize(text);
-        let tags = crate::pos::tag(&tokens);
-        DeterminerNounAgreement.check_tagged(&tokens, &tags).len()
+        tagged(text).len()
     }
 
     #[test]
@@ -487,5 +501,14 @@ mod tests {
         ] {
             assert_eq!(tagged_count(ok), 0, "faux positif sur « {ok} »");
         }
+    }
+
+    #[test]
+    fn tree_path_reaches_head_past_adjectives() {
+        // L'arc `det` relie le déterminant au nom tête par-delà les adjectifs
+        // antéposés (« un belle grande table » → « une »), sans balayage ni
+        // borne, et reste silencieux quand l'accord est correct.
+        assert_eq!(tagged_first("un belle grande table").as_deref(), Some("une"));
+        assert_eq!(tagged_count("une belle grande table"), 0);
     }
 }

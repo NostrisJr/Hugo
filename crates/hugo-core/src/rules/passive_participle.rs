@@ -399,7 +399,10 @@ mod integration {
 
     fn check_all(text: &str) -> Vec<String> {
         let tokens = tokenize(text);
-        let tags = pos::tag(&tokens);
+        // Comme le Checker : POS puis arbre de dépendances (lu par
+        // PastParticipleAvoir::check_tagged).
+        let mut tags = pos::tag(&tokens);
+        crate::dep::parse(&tokens, &mut tags);
         let mut out = vec![];
         for s in ImperatifGroupe1.check(&tokens) { out.extend(s.replacements); }
         for s in PastParticipleAvoir.check_tagged(&tokens, &tags) { out.extend(s.replacements); }

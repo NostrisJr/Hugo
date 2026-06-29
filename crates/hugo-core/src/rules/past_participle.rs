@@ -23,6 +23,7 @@
 //! ([`Rule::check_tagged`]).
 
 use super::{lexical_sentences, Rule};
+use crate::dep::DepRel;
 use crate::morpho::{self, Gender, Morph, MorphCategory, Number};
 use crate::pos::{Tagged, Upos};
 use crate::tokenizer::Token;
@@ -126,6 +127,28 @@ fn is_subject_pronoun(text: &str) -> bool {
 /// Vrai si le jeton est une forme conjuguée de l'auxiliaire « avoir ».
 fn is_avoir(text: &str) -> bool {
     morpho::verb_forms(text).iter().any(|v| v.lemma == "avoir")
+}
+
+/// Antécédent d'un pronom relatif « que/qu' » situé en `rel` : le nom (commun ou
+/// propre) le plus proche à sa gauche, en sautant les adjectifs/déterminants
+/// intercalés (« les livres **intéressants** que… » → « livres »). S'arrête au
+/// premier mot qui n'est ni nom ni modifieur antéposé (verbe, pronom, virgule).
+fn antecedent_before(tokens: &[Token], tags: &[Tagged], rel: usize) -> Option<usize> {
+    let mut i = rel;
+    while i > 0 {
+        i -= 1;
+        if !tokens[i].is_lexical() {
+            continue;
+        }
+        match tags[i].upos {
+            Upos::Noun | Upos::Propn => return Some(i),
+            // Modifieurs antéposés que l'on saute pour atteindre la tête nominale.
+            Upos::Adj | Upos::Det | Upos::Adv => continue,
+            // Tout autre mot (verbe, pronom, préposition…) : pas d'antécédent.
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// Vrai si le jeton est un adverbe pouvant s'intercaler entre l'auxiliaire et le
@@ -375,6 +398,108 @@ impl PastParticipleAvoir {
         }
         suggestions
     }
+
+    /// Chemin **piloté par l'arbre** (production). Le COD antéposé est l'enfant
+    /// `obj` du participe situé **avant** lui : un clitique (`la`/`les`), un
+    /// relatif (`que`/`qu'` → on remonte à l'antécédent nominal), ou un nom
+    /// antéposé (« quels livres as-tu lus »). L'auxiliaire `avoir` est confirmé
+    /// par l'arc `aux`. Cette structure capte des cas hors de portée du chemin
+    /// positionnel (modifieurs intercalés, adverbes) et **n'accorde jamais avec
+    /// un COD postposé** (`j'ai mangé une pomme`), l'arc `obj` étant alors à
+    /// droite du participe.
+    fn run_tree(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
+        let mut suggestions = Vec::new();
+        for p in 0..tokens.len() {
+            if !tokens[p].is_lexical() {
+                continue;
+            }
+            let parts = participles(&tokens[p].text);
+            let verb_lemma_fallback: Option<String> = if parts.is_empty() {
+                let all = morpho::lookup(&tokens[p].text);
+                let vl: std::collections::HashSet<&str> = all
+                    .iter()
+                    .filter(|m| m.category == MorphCategory::Verb)
+                    .map(|m| m.lemma.as_str())
+                    .collect();
+                (vl.len() == 1).then(|| vl.into_iter().next().unwrap().to_string())
+            } else {
+                None
+            };
+            if parts.is_empty() && verb_lemma_fallback.is_none() {
+                continue;
+            }
+
+            // Auxiliaire « avoir » : enfant `aux` du participe (exclut « être »).
+            let Some(aux) = crate::dep::child_with(tags, p, &[DepRel::Aux]) else {
+                continue;
+            };
+            if !is_avoir(&tokens[aux].text) {
+                continue;
+            }
+
+            // COD = enfant `obj` **antéposé** du participe.
+            let Some(obj) = crate::dep::child_with(tags, p, &[DepRel::Obj]) else {
+                continue;
+            };
+            if obj >= p {
+                continue; // COD postposé → pas d'accord avec « avoir ».
+            }
+
+            // Genre/nombre du COD selon sa nature.
+            let (gender, number, antecedent): (Option<Gender>, Number, Option<usize>) =
+                if let Some((g, n)) = cod_features(&tokens[obj].text) {
+                    (g, n, None) // clitique « la »/« les »
+                } else if matches!(normalize(&tokens[obj].text).as_str(), "que" | "qu") {
+                    let Some(ant) = antecedent_before(tokens, tags, obj) else {
+                        continue;
+                    };
+                    let Some((g, n)) = noun_features(&tokens[ant].text) else {
+                        continue;
+                    };
+                    (Some(g), n, Some(ant))
+                } else if matches!(tags[obj].upos, Upos::Noun | Upos::Propn) {
+                    let Some((g, n)) = noun_features(&tokens[obj].text) else {
+                        continue;
+                    };
+                    (Some(g), n, Some(obj))
+                } else {
+                    continue; // « l' », « me », « te »… : genre indéterminé.
+                };
+
+            let msg = match antecedent {
+                Some(ant) => format!(
+                    "Accord du participe passé : « {} » doit s'accorder avec le complément \
+                     d'objet direct antéposé « {} ».",
+                    tokens[p].text, tokens[ant].text
+                ),
+                None => format!(
+                    "Accord du participe passé : « {} » doit s'accorder avec le complément \
+                     d'objet direct antéposé.",
+                    tokens[p].text
+                ),
+            };
+
+            if !parts.is_empty() {
+                if let Some(s) = Self::suggest(&parts, &tokens[p], gender, number, &msg) {
+                    suggestions.push(s);
+                }
+            } else if let (Some(lemma), Some(g)) = (&verb_lemma_fallback, gender) {
+                // Forme finie homographe (« prit ») en position de PP : on
+                // engendre directement la forme accordée attendue.
+                if let Some(expected) = morpho::participle(lemma, g, number) {
+                    if !expected.eq_ignore_ascii_case(&tokens[p].text) {
+                        suggestions.push(Suggestion {
+                            span: tokens[p].span,
+                            message: msg,
+                            replacements: vec![match_case(&tokens[p].text, &expected)],
+                            rule_id: RULE_ID,
+                        });
+                    }
+                }
+            }
+        }
+        suggestions
+    }
 }
 
 impl Rule for PastParticipleAvoir {
@@ -383,7 +508,7 @@ impl Rule for PastParticipleAvoir {
     }
 
     fn check_tagged(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
-        self.run(tokens, |idx| tags[idx].upos == Upos::Pron)
+        self.run_tree(tokens, tags)
     }
 
     fn name(&self) -> &'static str {
@@ -402,7 +527,9 @@ mod tests {
 
     fn run(text: &str) -> Vec<Suggestion> {
         let tokens = tokenize(text);
-        let tags = crate::pos::tag(&tokens);
+        // Le chemin de production lit l'arbre : on l'analyse comme le Checker.
+        let mut tags = crate::pos::tag(&tokens);
+        crate::dep::parse(&tokens, &mut tags);
         PastParticipleAvoir.check_tagged(&tokens, &tags)
     }
 
@@ -456,5 +583,32 @@ mod tests {
     fn etre_auxiliary_is_out_of_scope() {
         // L'accord avec être relève d'une autre règle ; rien ici.
         assert_eq!(count("elles sont parties"), 0);
+    }
+
+    #[test]
+    fn relative_antecedent_basic() {
+        // Antécédent du relatif via l'arbre (obj « que ») + scan nominal.
+        assert_eq!(
+            first("les livres que j'ai lu").as_deref(),
+            Some(["lus".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn relative_antecedent_with_intervening_adjective() {
+        // GAIN DE RAPPEL : le chemin positionnel ratait l'antécédent à cause de
+        // l'adjectif intercalé ; l'arbre + scan nominal le retrouve.
+        assert_eq!(
+            first("les livres intéressants que j'ai lu").as_deref(),
+            Some(["lus".to_string()].as_slice())
+        );
+    }
+
+    #[test]
+    fn postposed_cod_is_silent() {
+        // COD postposé (« une pomme » après le participe) : aucun accord avec
+        // « avoir ». L'arc `obj` est à droite du participe → abstention.
+        assert_eq!(count("j'ai mangé une pomme"), 0);
+        assert_eq!(count("nous avons lu les livres"), 0);
     }
 }

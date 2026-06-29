@@ -15,6 +15,7 @@
 //! `je/tu/on/nous/vous`, au genre indéterminé, sont écartés.
 
 use super::{lexical_sentences, Rule};
+use crate::dep::DepRel;
 use crate::morpho::{self, Gender, MorphCategory, Number};
 use crate::pos::{Tagged, Upos};
 use crate::tokenizer::Token;
@@ -136,25 +137,53 @@ fn opens_object(tag: Upos) -> bool {
     matches!(tag, Upos::Det | Upos::Noun | Upos::Propn)
 }
 
-impl Rule for PronominalParticiple {
-    fn check(&self, tokens: &[Token]) -> Vec<Suggestion> {
-        self.check_tagged(tokens, &crate::pos::tag(tokens))
+impl PronominalParticiple {
+    /// Émet la correction d'accord du participe `part_token` avec un sujet de
+    /// genre/nombre donnés, ou `None` si déjà accordé / lemme ambigu / forme
+    /// introuvable. Partagé par les chemins positionnel et arbre.
+    fn suggest(part_token: &Token, gender: Gender, number: Number) -> Option<Suggestion> {
+        let parts = participles(&part_token.text);
+        if parts.is_empty() {
+            return None;
+        }
+        if parts
+            .iter()
+            .any(|m| m.gender == Some(gender) && m.number == Some(number))
+        {
+            return None; // déjà accordé
+        }
+        let mut lemmas = parts.iter().map(|m| m.lemma.as_str());
+        let lemma = lemmas.next().unwrap();
+        if !lemmas.all(|l| l == lemma) {
+            return None; // lemme ambigu
+        }
+        let corrected = morpho::participle(lemma, gender, number)?;
+        if corrected.eq_ignore_ascii_case(&part_token.text) {
+            return None;
+        }
+        Some(Suggestion {
+            span: part_token.span,
+            message: format!(
+                "Accord du participe passé pronominal : « {} » doit s'accorder avec le sujet.",
+                part_token.text
+            ),
+            replacements: vec![match_case(&part_token.text, &corrected)],
+            rule_id: RULE_ID,
+        })
     }
 
-    fn check_tagged(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
+    /// Chemin positionnel (sans arbre) : `sujet [ne] réfléchi être [adv] PP`,
+    /// garde COD postposé par le POS du token suivant. Sert au repli `check()`.
+    fn positional(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
         let mut suggestions = Vec::new();
         for lex in lexical_sentences(tokens) {
             for c in 0..lex.len() {
-                // Auxiliaire « être ».
                 if !is_etre(&lex[c].1.text) {
                     continue;
                 }
-                // Pronom réfléchi immédiatement avant (la négation « ne » se place
-                // avant le réfléchi : « il ne s'est pas levé »).
                 if c == 0 || !is_reflexive(&lex[c - 1].1.text) {
                     continue;
                 }
-                // Sujet : avant le réfléchi, en sautant une éventuelle négation.
                 let mut s = c - 1;
                 while s > 0 && is_ne(&lex[s - 1].1.text) {
                     s -= 1;
@@ -165,8 +194,6 @@ impl Rule for PronominalParticiple {
                 let Some((gender, number)) = subject_features(lex[s - 1].1) else {
                     continue;
                 };
-
-                // Participe : après l'auxiliaire, en sautant les adverbes.
                 let mut p = c + 1;
                 while p < lex.len() && is_skippable_adverb(&lex[p].1.text) {
                     p += 1;
@@ -174,50 +201,77 @@ impl Rule for PronominalParticiple {
                 let Some(&(_, part_token)) = lex.get(p) else {
                     continue;
                 };
-                let parts = participles(&part_token.text);
-                if parts.is_empty() {
-                    continue;
-                }
-
-                // Garde COD postposé : un déterminant ou un nom après le participe
-                // signale un objet direct → participe invariable, on s'abstient.
+                // Garde COD postposé : déterminant ou nom après le participe.
                 if let Some(&(next_idx, _)) = lex.get(p + 1) {
                     if opens_object(tags[next_idx].upos) {
                         continue;
                     }
                 }
-
-                // Déjà accordé ?
-                let agrees = parts
-                    .iter()
-                    .any(|m| m.gender == Some(gender) && m.number == Some(number));
-                if agrees {
-                    continue;
+                if let Some(sugg) = Self::suggest(part_token, gender, number) {
+                    suggestions.push(sugg);
                 }
-                let mut lemmas = parts.iter().map(|m| m.lemma.as_str());
-                let lemma = lemmas.next().unwrap();
-                if !lemmas.all(|l| l == lemma) {
-                    continue; // lemme ambigu
-                }
-                let Some(corrected) = morpho::participle(lemma, gender, number) else {
-                    continue;
-                };
-                if corrected.eq_ignore_ascii_case(&part_token.text) {
-                    continue;
-                }
-
-                suggestions.push(Suggestion {
-                    span: part_token.span,
-                    message: format!(
-                        "Accord du participe passé pronominal : « {} » doit s'accorder avec le sujet.",
-                        part_token.text
-                    ),
-                    replacements: vec![match_case(&part_token.text, &corrected)],
-                    rule_id: RULE_ID,
-                });
             }
         }
         suggestions
+    }
+
+    /// Chemin **piloté par l'arbre** (production). Le participe pronominal porte
+    /// un sujet (`nsubj`/`nsubj:pass`), un réfléchi préverbal (enfant clitique
+    /// `se`/`s'`/`me`…) et son auxiliaire `être` (arc `aux`). Le **COD postposé**
+    /// — qui rend le participe invariable (« elle s'est lavé **les mains** ») —
+    /// est l'enfant `obj` situé **après** le participe ; on s'abstient alors.
+    /// Plus robuste que le positionnel : sujet et COD repérés par-delà négation,
+    /// adverbes et compléments intercalés.
+    fn run_tree(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
+        let mut suggestions = Vec::new();
+        for p in 0..tokens.len() {
+            if !tokens[p].is_lexical() || participles(&tokens[p].text).is_empty() {
+                continue;
+            }
+            // Auxiliaire « être » (arc `aux`).
+            let Some(aux) = crate::dep::child_with(tags, p, &[DepRel::Aux]) else {
+                continue;
+            };
+            if !is_etre(&tokens[aux].text) {
+                continue;
+            }
+            // Réfléchi préverbal : un enfant clitique réflexif avant le participe
+            // (confirme le verbe pronominal, quelle que soit son étiquette
+            // expl/iobj/obj selon le parser).
+            let has_reflexive = crate::dep::children(tags, p)
+                .into_iter()
+                .any(|c| c < p && is_reflexive(&tokens[c].text));
+            if !has_reflexive {
+                continue;
+            }
+            // Sujet à genre connu (nsubj/nsubj:pass/csubj).
+            let Some(subj) = crate::dep::subject_of(tags, p) else {
+                continue;
+            };
+            let Some((gender, number)) = subject_features(&tokens[subj]) else {
+                continue;
+            };
+            // Garde COD postposé : un objet direct après le participe → invariable.
+            if let Some(obj) = crate::dep::child_with(tags, p, &[DepRel::Obj]) {
+                if obj > p {
+                    continue;
+                }
+            }
+            if let Some(sugg) = Self::suggest(&tokens[p], gender, number) {
+                suggestions.push(sugg);
+            }
+        }
+        suggestions
+    }
+}
+
+impl Rule for PronominalParticiple {
+    fn check(&self, tokens: &[Token]) -> Vec<Suggestion> {
+        self.positional(tokens, &crate::pos::tag(tokens))
+    }
+
+    fn check_tagged(&self, tokens: &[Token], tags: &[Tagged]) -> Vec<Suggestion> {
+        self.run_tree(tokens, tags)
     }
 
     fn name(&self) -> &'static str {
@@ -234,16 +288,24 @@ mod tests {
     use super::*;
     use crate::tokenizer::tokenize;
 
+    /// Construit les tags comme le Checker (POS + arbre) et passe par le chemin
+    /// de production `check_tagged`.
+    fn tagged(text: &str) -> Vec<Suggestion> {
+        let tokens = tokenize(text);
+        let mut tags = crate::pos::tag(&tokens);
+        crate::dep::parse(&tokens, &mut tags);
+        PronominalParticiple.check_tagged(&tokens, &tags)
+    }
+
     fn first(text: &str) -> Option<String> {
-        PronominalParticiple
-            .check(&tokenize(text))
+        tagged(text)
             .into_iter()
             .next()
             .and_then(|s| s.replacements.into_iter().next())
     }
 
     fn count(text: &str) -> usize {
-        PronominalParticiple.check(&tokenize(text)).len()
+        tagged(text).len()
     }
 
     #[test]
@@ -284,5 +346,12 @@ mod tests {
     fn unknown_gender_subject_is_ignored() {
         // « je me suis levé » : genre du locuteur inconnu → aucune correction.
         assert_eq!(count("je me suis levé"), 0);
+    }
+
+    #[test]
+    fn postposed_object_with_adverb_blocks_agreement() {
+        // ROBUSTESSE : le COD postposé reste repéré par l'arbre malgré un adverbe
+        // intercalé (le chemin positionnel ne regardait que le token suivant).
+        assert_eq!(count("elle s'est soigneusement lavé les mains"), 0);
     }
 }
